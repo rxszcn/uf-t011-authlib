@@ -1,0 +1,33 @@
+.. _specs/rfc7515:
+
+RFC7515: JSON Web Signature
+===========================
+
+.. deprecated:: 1.7
+    ``authlib.jose`` will be removed in Authlib 2.0. Use joserfc_ instead.
+    :ref:`joserfc_upgrade` explains how to migrate.
+
+.. _joserfc: https://jose.authlib.org/en/
+
+.. meta::
+    :description: API references on RFC7515 JSON Web Signature (JWS) Authlib implementation.
+
+This section contains the generic implementation of :rfc:`7515`. Find how to use
+it in :ref:`JWS Guide <jws_guide>`.
+
+
+API Reference
+-------------
+
+.. autoclass:: authlib.jose.JsonWebSignature
+    :member-order: bysource
+    :members:
+
+
+.. autoclass:: authlib.jose.JWSHeader
+
+.. autoclass:: authlib.jose.JWSObject
+
+.. autoclass:: authlib.jose.JWSAlgorithm
+    :member-order: bysource
+    :members:

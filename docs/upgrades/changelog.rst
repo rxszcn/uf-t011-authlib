@@ -1,0 +1,599 @@
+Changelog
+=========
+
+.. meta::
+    :description: The full list of changes between each Authlib release.
+
+Here you can see the full list of changes between each Authlib release.
+
+.. scriv-insert-here
+
+.. _changelog-1.9.5:
+
+Version 1.9.5 — 2026-11-05
+--------------------------
+
+Security
+~~~~~~~~
+
+- ``authlib.jose`` refuses as an HMAC secret every OpenSSH public key or
+  certificate that it can load as an RSA, EC or OKP key. It used to accept a
+  key with a tab after the key type, and certificates. These keys verify
+  ``RS256`` and ``EdDSA`` tokens, so anyone who knew the public key could
+  forge an ``HS256`` token for an application that did not restrict the
+  algorithms. This completes the fix for CVE-2026-114615.
+  `GHSA-f7j6-p4qx-gq99 <https://github.com/authlib/authlib/security/advisories/GHSA-f7j6-p4qx-gq99>`_
+
+.. _changelog-1.9.4:
+
+Version 1.9.4 — 2026-11-04
+--------------------------
+
+Security
+~~~~~~~~
+
+- ``IDJAGGrant`` stores the verified claims of the ID-JAG in
+  ``request.id_jag_claims``. ``authenticate_user`` can use them to resolve
+  the user with the ``iss`` and ``sub`` claims, and ``tenant`` for a
+  multi-tenant IdP. The documentation used to resolve the user with ``sub``
+  alone. An IdP, or a tenant of an IdP, could then get access tokens for the
+  users of another one. Update ``authenticate_user`` if your server trusts
+  several IdPs or a multi-tenant IdP.
+  `GHSA-9qr6-8289-9j56 <https://github.com/authlib/authlib/security/advisories/GHSA-9qr6-8289-9j56>`_
+
+.. _changelog-1.9.3:
+
+Version 1.9.3 — 2026-11-03
+--------------------------
+
+Security
+~~~~~~~~
+
+- The OpenID Connect implicit and hybrid grants refuse ``response_mode=form_post``
+  when the redirect URI does not use the ``http`` or ``https`` scheme. They
+  return an ``invalid_request`` error and do not redirect. A client with a
+  ``javascript:`` redirect URI could run a script in the origin of the
+  authorization server, even when the user denied the authorization.
+  `GHSA-gp2m-377p-m4j3 <https://github.com/authlib/authlib/security/advisories/GHSA-gp2m-377p-m4j3>`_
+
+.. _changelog-1.9.2:
+
+Version 1.9.2 — 2026-11-01
+--------------------------
+
+Security
+~~~~~~~~
+
+- ``IDJAGGrant`` limits the access token to the scopes in the ``scope`` claim
+  of the ID-JAG. A client used to get any scope allowed by its registration,
+  even when the IdP granted fewer scopes. Without a ``scope`` request
+  parameter, the access token now gets the scopes of the claim instead of no
+  scope.
+  `GHSA-f3fg-34g9-v7jx <https://github.com/authlib/authlib/security/advisories/GHSA-f3fg-34g9-v7jx>`_
+
+.. _changelog-1.9.1:
+
+Version 1.9.1 — 2026-10-14
+--------------------------
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- The RFC 7592 client configuration endpoint calls ``check_client()`` on the
+  registration access token. Tokens must implement
+  ``TokenMixin.check_client``.
+
+Security
+~~~~~~~~
+
+- ``authlib.jose`` rejects empty HMAC keys with a ``ValueError``. An empty key
+  used to let anyone forge HS256, HS384 and HS512 signatures. The minimum
+  ``joserfc`` version is now 1.6.8, which has the same check.
+  `GHSA-8m4g-j4wp-wgcg <https://github.com/authlib/authlib/security/advisories/GHSA-8m4g-j4wp-wgcg>`_
+- The RFC 7592 client configuration endpoint rejects registration access
+  tokens issued to another client, with an ``access_denied`` error. A client
+  could read, update or delete the registration of any other client.
+  `GHSA-c73q-w75p-j82v <https://github.com/authlib/authlib/security/advisories/GHSA-c73q-w75p-j82v>`_
+
+Version 1.9.0
+-------------
+
+**Released on Oct 14, 2026**
+
+- **Breaking change**: ID Tokens with ``nonce_supported=false`` no longer
+  bypass validation of the nonce saved by the client. Missing or mismatched
+  nonces are rejected in both synchronous and asynchronous integrations.
+  Provider compatibility exceptions must be explicitly configured by the
+  application, rather than enabled by an ID Token claim. :pr:`949`
+- Enforce JAR ``require_signed_request_object`` independently of the signing
+  algorithm configuration. An explicit algorithm list or a customized
+  ``get_request_object_signing_algorithms()`` cannot allow ``alg=none`` when
+  either the server or the client requires signed request objects. :pr:`949`
+- **Breaking change**: JAR ``request_uri`` is validated before retrieval and
+  rejected by default. Applications must implement ``validate_request_uri()``
+  with an explicit secure retrieval policy. See :ref:`specs/rfc9101` for
+  retrieval safeguards. :pr:`949`
+- Add ``authlib.oidc.core.OpenIDJWTAuthenticationRequest`` to enforce OIDC
+  ``require_request_uri_registration`` separately from the generic JAR
+  retrieval policy. Registered URIs must also pass the application's
+  validation policy. See :ref:`oidc_request_objects`. :pr:`949`
+- Reject PEM and SSH key material used as symmetric JOSE keys, including
+  PEM keys with leading whitespace, comments, or a byte-order mark and
+  keys supplied through an oct JWK or an ``OctKey`` instance. :pr:`945`
+- Use the client's allowed scope when validating and issuing OIDC implicit
+  and hybrid responses. Clients without the ``openid`` scope can no longer
+  obtain an ID Token by including it in the raw request, and custom token
+  generators receive only the allowed scope. :pr:`945`
+- **Breaking change**: ``JWTBearerGrant.get_audiences()`` must return a
+  non-empty list of audience identifiers for the authorization server.
+  Assertions are rejected with ``invalid_grant`` when audiences are not
+  configured, instead of issuing a deprecation warning and skipping
+  audience value validation. :pr:`945`
+- Require client authentication for ID-JAG token requests and bind the
+  assertion's ``client_id`` to the authenticated client. Missing or invalid
+  credentials and client mismatches no longer allow token issuance. Rejected
+  authentication and mismatches do not consume the assertion's replay identifier.
+  :pr:`955`
+- Add support for the Identity Assertion JWT Authorization Grant (ID-JAG),
+  a draft extension to :rfc:`7523` for cross-application access using identity
+  assertions issued by an external enterprise IdP.
+  See :ref:`specs/rfc7523-id-jag` for details. :pr:`898`
+- The async OpenID Connect client returns ``None`` from ``parse_id_token()``
+  when the token has no ``id_token``, like the sync client. It used to raise
+  a ``KeyError``. :pr:`924`
+- OAuth 2 and assertion clients raise the HTTP error of the token endpoint
+  response when its body is not a JSON object, such as a plain-text 429 page
+  from a gateway. They used to raise a ``JSONDecodeError`` or a ``TypeError``.
+  A success response with such a body raises a ``ValueError``.
+  :issue:`928` :pr:`929`
+- ``JsonWebSignature.deserialize_json()`` rejects a JWS JSON Serialization
+  with an empty ``signatures`` list. It used to accept it as valid. :pr:`938`
+- ``JWTClaims.validate()`` rejects boolean ``exp``, ``nbf`` and ``iat`` values
+  with an ``InvalidClaimError``. :issue:`641` :pr:`942`
+- OAuth 1.0 clients send each OAuth parameter once when the signature is
+  placed in the query string or the form body. Duplicated parameters used to
+  produce an invalid signature. :issue:`542` :pr:`943`
+
+Version 1.8.0
+-------------
+
+**Released on Aug 30, 2026**
+
+- **Breaking change**: ``authlib.integrations.httpx_client`` is now powered by
+  ``httpx2`` instead of ``httpx``. Install ``httpx2`` to keep using this
+  integration; the public import path and class names are unchanged. When
+  ``httpx2`` is not installed, the integration falls back to ``httpx`` and emits
+  an ``AuthlibDeprecationWarning``. This fallback will be removed in a future
+  release. :issue:`904`
+- **Breaking change**: the client metadata ``id_token_signed_response_alg``
+  now takes precedence over ``get_jwt_config()["alg"]`` when signing OIDC
+  ``id_token``, in line with `OpenID Connect Registration 1.0 Section 2
+  <https://openid.net/specs/openid-connect-registration-1_0.html#ClientMetadata>`_.
+  ``get_jwt_config()["alg"]`` is now used as a server-wide default when the
+  client did not configure an algorithm. Override
+  ``get_client_algorithm(client)`` if you need the previous behaviour.
+  :issue:`806`
+- Fix ``is_secure_transport()`` accepting cleartext URIs whose ``userinfo``
+  component looks like a loopback host, such as
+  ``http://localhost:80@attacker.test/cb``. The loopback exemption is now
+  matched on the parsed host, and no longer requires an explicit port.
+- Reject URIs with a ``userinfo`` component during client and server metadata
+  validation, as in ``https://client.test@attacker.test/cb``. URIs that
+  ``urlparse`` refuses to parse, such as ``http://[not-an-ip]/``, are also
+  rejected instead of raising an unhandled ``ValueError``.
+- Cast the ``sub`` claim to a string in the RFC 9068 and RFC 7523
+  ``JWTBearerTokenGenerator``, as required by RFC 7519 Section 4.1.2.
+  ``joserfc`` 1.7.3 started validating this claim and rejected the previously
+  emitted non-string values (e.g. an integer ``get_user_id()``).
+  :issue:`910` :pr:`911`
+- Require ``joserfc>=1.6.1`` and ``cryptography>=45.0.1``. The RFC 9068 ``amr``
+  validation uses ``InvalidClaimError``'s ``description`` argument, added in
+  ``joserfc`` 1.6.1.
+- Declare lower bounds for the optional integration dependencies and test them
+  in CI against their minimum versions with uv's ``lowest-direct`` resolution.
+- The token endpoint answers malformed RFC 7523 assertions with an
+  ``invalid_client`` or ``invalid_grant`` error instead of raising an unhandled
+  exception. ``JWTBearerGrant.resolve_issuer_client()`` may return ``None`` for
+  an unknown issuer.
+- The RFC 9068 ``JWTBearerTokenValidator`` answers with an ``invalid_token``
+  error for any ``JoseError`` raised while decoding an access token, instead of
+  only ``DecodeError``. An unknown ``kid`` used to raise an unhandled
+  ``InvalidKeyIdError``. :pr:`891`
+- Add a ``leeway`` parameter to the RFC 7523 ``JWTBearerTokenValidator``, which
+  used to be hardcoded to 60 seconds. :pr:`903`
+- ``sign_jwt_bearer_assertion()`` generates a default ``jti`` claim when the
+  caller did not provide one, as :rfc:`7523` §3 recommends against replay
+  attacks. This matches what ``OAuth2Session`` already did for client
+  assertions. :pr:`897`
+- Add optional ``client_id`` parameter to ``AssertionClient`` (and its
+  ``AssertionSession`` / httpx wrappers) so it can be sent in the token
+  endpoint request body per :rfc:`7521` §4.1 and :rfc:`6749` §3.2.1. :pr:`476`
+- The OpenID Connect client no longer rejects an ``id_token`` whose JWS header
+  carries unregistered parameters. :issue:`902`
+- Omit the ``nonce`` and ``auth_time`` claims from the ``id_token`` instead of
+  emitting them with a ``null`` value. :issue:`921`
+- ``DeviceAuthorizationEndpoint`` saves the device credential with the
+  authenticated client id. It used to read ``request.payload.client_id``, which
+  is ``None`` when the client authenticates with ``client_secret_basic``.
+  :issue:`798` :pr:`908`
+- Fix the OAuth 1.0a ``InsecureTransportError`` description telling users that
+  OAuth 2 must use HTTPS. :pr:`919`
+
+Version 1.7.2
+-------------
+
+**Released on May 6, 2026**
+
+- Fix ``PrivateKeyJWT`` rejecting ``ECKey`` private keys (e.g. for ``ES256``).
+  The client private key is no longer forcibly imported as an ``RSAKey``;
+  ``joserfc``'s key auto-detection is used instead. :pr:`852`
+- Allow ``ClientSecretJWT`` and ``PrivateKeyJWT`` to sign client assertions
+  with non-recommended algorithms (e.g. ``RS384``) when explicitly set via the
+  ``alg`` parameter. :issue:`883`
+- Validate BCP 47 language tags in ``ui_locales_supported``, ``claims_locales_supported``
+  and ``UserInfo.locale``. :pr:`873`
+
+Version 1.7.1
+-------------
+
+**Released on May 4, 2026**
+
+- Fix ``AuthlibDeprecationWarning`` being emitted on import when using integrations
+  that do not use ``authlib.jose`` directly. :issue:`880`
+- Fix redirecting to unvalidated ``redirect_uri`` on ``InvalidScopeError``
+  in ``OpenIDImplicitGrant`` and ``OpenIDHybridGrant``.
+
+Version 1.7.0
+-------------
+
+**Released on Apr 18, 2026**
+
+- Add support for `OpenID Connect RP-Initiated Logout 1.0
+  <https://openid.net/specs/openid-connect-rpinitiated-1_0.html>`_.
+  See :ref:`specs/rpinitiated` for details. :issue:`500`
+- Per RFC 6749 Section 3.3, the ``scope`` parameter is now optional at both
+  authorization and token endpoints. ``client.get_allowed_scope()`` is called
+  to determine the default scope when omitted. :issue:`845`
+- Stop support for Python 3.9, start support Python 3.14. :pr:`850`
+- Allow ``AuthorizationServerMetadata.validate()`` to compose with RFC extension classes.
+- Fix ``expires_at=0`` being incorrectly treated as ``None``. :issue:`530`
+- Allow ``ResourceProtector`` decorator to be used without parentheses. :issue:`604`
+- Implement RFC9700 PKCE downgrade countermeasure.
+- Set ``User-Agent`` header when fetching server metadata and JWKs. :issue:`704`
+- RFC7523 accepts the issuer URL as a valid audience. :issue:`730`
+- Fix ``InvalidTokenError`` extra attributes being wrapped instead of passed as
+  individual key=value pairs in the ``WWW-Authenticate`` header. :pr:`872`
+
+Upgrade Guide: :ref:`joserfc_upgrade`.
+
+Version 1.6.11
+--------------
+
+**Released on Apr 16, 2026**
+
+- Fix CSRF vulnerability in the Starlette OAuth client when a ``cache`` is
+  configured.
+
+Version 1.6.10
+--------------
+
+**Released on Apr 13, 2026**
+
+- Fix redirecting to unvalidated ``redirect_uri`` on ``UnsupportedResponseTypeError``.
+
+Version 1.6.9
+-------------
+
+**Released on Mar 2, 2026**
+
+- Not using header's ``jwk`` automatically.
+- Add ``ES256K`` into default jwt algorithms.
+- Remove deprecated algorithm from default registry.
+- Generate random ``cek`` when ``cek`` length doesn't match.
+
+Version 1.6.8
+-------------
+
+**Released on Feb 17, 2026**
+
+- Add ``EdDSA`` to default ``jwt`` instance.
+
+Version 1.6.7
+-------------
+
+**Released on Feb 6, 2026**
+
+- Set supported algorithms for the default ``jwt`` instance.
+
+Version 1.6.6
+-------------
+
+**Released on Jan 9, 2026**
+
+- ``get_jwt_config`` takes a ``client`` parameter, :pr:`844`.
+- Fix incorrect signature when ``Content-Type`` is x-www-form-urlencoded for OAuth 1.0 Client, :pr:`778`.
+- Use ``expires_in`` in ``OAuth2Token`` when ``expires_at`` is unparsable, :pr:`842`.
+- Always track ``state`` in session for OAuth client integrations.
+
+Version 1.6.5
+-------------
+
+**Released on Oct 2, 2025**
+
+- RFC7591 ``generate_client_info`` and ``generate_client_secret`` take a ``request`` parameter.
+- Add size limitation when decode JWS/JWE to prevent DoS.
+- Add size limitation for ``DEF`` JWE zip algorithm.
+
+Version 1.6.4
+-------------
+
+**Released on Sep 17, 2025**
+
+- Fix ``InsecureTransportError`` error raising. :issue:`795`
+- Fix ``response_mode=form_post`` with Starlette client. :issue:`793`
+- Validate ``crit`` header value, reject unprotected header in ``crit`` header.
+
+Version 1.6.3
+-------------
+
+**Released on Aug 26, 2025**
+
+- OIDC ``id_token`` are signed according to ``id_token_signed_response_alg``
+  client metadata. :issue:`755`
+
+Version 1.6.2
+-------------
+
+**Released on Aug 23, 2025**
+
+- Temporarily restore ``OAuth2Request`` ``body`` parameter. :issue:`781` :pr:`791`
+- Allow ``127.0.0.1`` in insecure transport mode. :pr:`788`
+- Raise ``MissingCodeException`` when the ``code`` parameter is missing. :issue:`793` :pr:`794`
+- Fix ``id_token`` generation with `EdDSA` algs. :issue:`799` :pr:`800`
+
+Version 1.6.1
+-------------
+
+**Released on Jul 20, 2025**
+
+- Filter key set with additional "alg" and "use" parameters.
+- Restore and deprecate ``OAuth2Request`` ``body`` parameter. :issue:`781`
+
+Version 1.6.0
+-------------
+
+**Released on May 22, 2025**
+
+- Fix issue when :rfc:`RFC9207 <9207>` is enabled and the authorization endpoint response is not a redirection. :pr:`733`
+- Fix missing ``state`` parameter in authorization error responses. :issue:`525`
+- Support for the ``none`` JWS algorithm.
+- Fix ``response_types`` strict order during dynamic client registration. :issue:`760`
+- Implement :rfc:`RFC9101 The OAuth 2.0 Authorization Framework: JWT-Secured Authorization Request (JAR) <9101>`. :issue:`723`
+- OIDC :class:`UserInfo endpoint <authlib.oidc.core.userinfo.UserInfoEndpoint>` support. :issue:`459`
+
+**Breaking changes**:
+
+- Support for ``acr`` and ``amr`` claims in ``id_token``. :issue:`734`
+  The ``OAuth2AuthorizationCodeMixin`` must have a migration to support the new fields.
+
+Version 1.5.2
+-------------
+
+**Released on Apr 1, 2025**
+
+- Forbid fragments in ``redirect_uris``. :issue:`714`
+- Fix invalid characters in ``error_description``. :issue:`720`
+- Add ``claims_cls`` parameter for client's ``parse_id_token`` method. :issue:`725`
+
+Version 1.5.1
+-------------
+
+**Released on Feb 28, 2025**
+
+- Fix RFC9207 ``iss`` parameter. :pr:`715`
+
+Version 1.5.0
+-------------
+
+**Released on Feb 25, 2025**
+
+- Fix token introspection auth method for clients. :pr:`662`
+- Optional ``typ`` claim in JWT tokens. :pr:`696`
+- JWT validation leeway. :pr:`689`
+- Implement server-side :rfc:`RFC9207 <9207>`. :issue:`700` :pr:`701`
+- ``generate_id_token`` can take a ``kid`` parameter. :pr:`702`
+- More detailed ``InvalidClientError``. :pr:`706`
+- OpenID Connect Dynamic Client Registration implementation. :pr:`707`
+
+Version 1.4.1
+-------------
+
+**Released on Jan 28, 2025**
+
+- Improve garbage collection on OAuth clients. :issue:`698`
+- Fix client parameters for httpx. :issue:`694`
+
+Version 1.4.0
+-------------
+
+**Released on Dec 20, 2024**
+
+- Fix ``id_token`` decoding when kid is null. :pr:`659`
+- Support for Python 3.13. :pr:`682`
+- Force login if the ``prompt`` parameter value is ``login``. :pr:`637`
+- Support for httpx 0.28, :pr:`695`
+
+**Breaking changes**:
+
+- Stop support for Python 3.8. :pr:`682`
+
+Version 1.3.2
+-------------
+
+**Released on Aug 30 2024**
+
+- Prevent ever-growing session size for OAuth clients.
+- Revert ``quote`` client id and secret.
+- ``unquote`` basic auth header for authorization server.
+
+Version 1.3.1
+-------------
+
+**Released on June 4, 2024**
+
+- Prevent ``OctKey`` to import ssh and PEM strings.
+
+
+Version 1.3.0
+-------------
+
+**Released on Dec 17, 2023**
+
+- Restore ``AuthorizationServer.create_authorization_response`` behavior, via :PR:`558`
+- Include ``leeway`` in ``validate_iat()`` for JWT, via :PR:`565`
+- Fix ``encode_client_secret_basic``, via :PR:`594`
+- Use single key in JWK if JWS does not specify ``kid``, via :PR:`596`
+- Fix error when RFC9068 JWS has no scope field, via :PR:`598`
+- Get werkzeug version using importlib, via :PR:`591`
+
+**New features**:
+
+- RFC9068 implementation, via :PR:`586`, by @azmeuk.
+
+**Breaking changes**:
+
+- End support for python 3.7
+
+Version 1.2.1
+-------------
+
+**Released on Jun 25, 2023**
+
+- Apply headers in ``ClientSecretJWT.sign`` method, via :PR:`552`
+- Allow falsy but non-None grant uri params, via :PR:`544`
+- Fixed ``authorize_redirect`` for Starlette v0.26.0, via :PR:`533`
+- Removed ``has_client_secret`` method and documentation, via :PR:`513`
+- Removed ``request_invalid`` and ``token_revoked`` remaining occurrences
+  and documentation. :PR:`514`
+- Fixed RFC7591 ``grant_types`` and ``response_types`` default values, via :PR:`509`.
+- Add support for python 3.12, via :PR:`590`.
+
+Version 1.2.0
+-------------
+
+**Released on Dec 6, 2022**
+
+- Not passing ``request.body`` to ``ResourceProtector``, via :issue:`485`.
+- Use ``flask.g`` instead of ``_app_ctx_stack``, via :issue:`482`.
+- Add ``headers`` parameter back to ``ClientSecretJWT``, via :issue:`457`.
+- Always passing ``realm`` parameter in OAuth 1 clients, via :issue:`339`.
+- Implemented RFC7592 Dynamic Client Registration Management Protocol, via :PR:`505`.
+- Add ``default_timeout`` for requests ``OAuth2Session`` and ``AssertionSession``.
+- Deprecate ``jwk.loads`` and ``jwk.dumps``
+
+Version 1.1.0
+-------------
+
+**Released on Sep 13, 2022**
+
+This release contains breaking changes and security fixes.
+
+- Allow to pass ``claims_options`` to Framework OpenID Connect clients, via :PR:`446`.
+- Fix ``.stream`` with context for HTTPX OAuth clients, via :PR:`465`.
+- Fix Starlette OAuth client for cache store, via :PR:`478`.
+
+**Breaking changes**:
+
+- Raise ``InvalidGrantError`` for invalid code, redirect_uri and no user errors in OAuth
+  2.0 server.
+- The default ``authlib.jose.jwt`` would only work with JSON Web Signature algorithms, if
+  you would like to use JWT with JWE algorithms, please pass the algorithms parameter:
+
+  .. code-block:: python
+
+      jwt = JsonWebToken(['A128KW', 'A128GCM', 'DEF'])
+
+**Security fixes**: CVE-2022-39175 and CVE-2022-39174, both related to JOSE.
+
+Version 1.0.1
+-------------
+
+**Released on Apr 6, 2022**
+
+- Fix authenticate_none method, via :issue:`438`.
+- Allow to pass in alternative signing algorithm to RFC7523 authentication methods via :PR:`447`.
+- Fix ``missing_token`` for Flask OAuth client, via :issue:`448`.
+- Allow ``openid`` in any place of the scope, via :issue:`449`.
+- Security fix for validating essential value on blank value in JWT, via :issue:`445`.
+
+
+Version 1.0.0
+-------------
+
+**Released on Mar 15, 2022.**
+
+We have dropped support for Python 2 in this release. We have removed
+built-in SQLAlchemy integration.
+
+**OAuth Client Changes:**
+
+The whole framework client integrations have been restructured, if you are
+using the client properly, e.g. ``oauth.register(...)``, it would work as
+before.
+
+**OAuth Provider Changes:**
+
+In Flask OAuth 2.0 provider, we have removed the deprecated
+``OAUTH2_JWT_XXX`` configuration, instead, developers should define
+`.get_jwt_config` on OpenID extensions and grant types.
+
+**SQLAlchemy** integrations has been removed from Authlib. Developers
+should define the database by themselves.
+
+**JOSE Changes**
+
+- ``JWS`` has been renamed to ``JsonWebSignature``
+- ``JWE`` has been renamed to ``JsonWebEncryption``
+- ``JWK`` has been renamed to ``JsonWebKey``
+- ``JWT`` has been renamed to ``JsonWebToken``
+
+The "Key" model has been re-designed, checkout the :ref:`jwk_guide` for updates.
+
+Added ``ES256K`` algorithm for JWS and JWT.
+
+**Breaking Changes**: find how to solve the deprecate issues via https://git.io/JkY4f
+
+
+.. scriv-end-here
+
+Old Versions
+------------
+
+Find old changelog at https://github.com/authlib/authlib/releases
+
+- Version 0.15.5: Released on Oct 18, 2021
+- Version 0.15.4: Released on Jul 17, 2021
+- Version 0.15.3: Released on Jan 15, 2021
+- Version 0.15.2: Released on Oct 18, 2020
+- Version 0.15.1: Released on Oct 14, 2020
+- Version 0.15.0: Released on Oct 10, 2020
+- Version 0.14.3: Released on May 18, 2020
+- Version 0.14.2: Released on May 6, 2020
+- Version 0.14.1: Released on Feb 12, 2020
+- Version 0.14.0: Released on Feb 11, 2020
+- Version 0.13.0: Released on Nov 11, 2019
+- Version 0.12.0: Released on Sep 3, 2019
+- Version 0.11.0: Released on Apr 6, 2019
+- Version 0.10.0: Released on Oct 12, 2018
+- Version 0.9.0: Released on Aug 12, 2018
+- Version 0.8.0: Released on Jun 17, 2018
+- Version 0.7.0: Released on Apr 28, 2018
+- Version 0.6.0: Released on Mar 20, 2018
+- Version 0.5.1: Released on Feb 11, 2018
+- Version 0.5.0: Released on Feb 11, 2018
+- Version 0.4.1: Released on Feb 2, 2018
+- Version 0.4.0: Released on Jan 31, 2018
+- Version 0.3.0: Released on Dec 24, 2017
+- Version 0.2.1: Released on Dec 6, 2017
+- Version 0.2.0: Released on Nov 25, 2017
+- Version 0.1.0: Released on Nov 18, 2017

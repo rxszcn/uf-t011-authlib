@@ -1,0 +1,305 @@
+import time
+
+import pytest
+from httpx2 import ASGITransport
+from joserfc import jwk
+from joserfc import jwt
+from joserfc.errors import InvalidClaimError
+from joserfc.errors import InvalidKeyIdError
+from joserfc.errors import MissingClaimError
+from joserfc.errors import UnsupportedAlgorithmError
+from joserfc.jwk import KeySet
+from starlette.requests import Request
+
+from authlib.integrations.starlette_client import OAuth
+from authlib.oidc.core.grants.util import create_half_hash
+
+from ..asgi_helper import AsyncPathMapDispatch
+from ..util import get_bearer_token
+from ..util import read_key_file
+
+secret_key = jwk.import_key("test-oct-secret", "oct", {"kid": "f"})
+
+
+async def run_fetch_userinfo(payload):
+    oauth = OAuth()
+
+    async def fetch_token(request):
+        return get_bearer_token()
+
+    transport = ASGITransport(AsyncPathMapDispatch({"/userinfo": {"body": payload}}))
+
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        fetch_token=fetch_token,
+        userinfo_endpoint="https://provider.test/userinfo",
+        client_kwargs={
+            "transport": transport,
+        },
+    )
+
+    req_scope = {"type": "http", "session": {}}
+    req = Request(req_scope)
+    user = await client.userinfo(request=req)
+    assert user.sub == "123"
+
+
+@pytest.mark.asyncio
+async def test_fetch_userinfo():
+    await run_fetch_userinfo({"sub": "123"})
+
+
+@pytest.mark.asyncio
+async def test_parse_id_token():
+    token = get_bearer_token()
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "auth_time": now,
+        "exp": now + 3600,
+        "nonce": "n",
+        "at_hash": create_half_hash(token["access_token"], "HS256").decode("utf-8"),
+    }
+    id_token = jwt.encode({"alg": "HS256"}, claims, secret_key)
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        fetch_token=get_bearer_token,
+        jwks={"keys": [secret_key.as_dict()]},
+        issuer="https://provider.test",
+        id_token_signing_alg_values_supported=["HS256", "RS256"],
+    )
+    assert await client.parse_id_token(token, nonce="n") is None
+
+    token["id_token"] = id_token
+    user = await client.parse_id_token(token, nonce="n")
+    assert user.sub == "123"
+
+    claims_options = {"iss": {"value": "https://provider.test"}}
+    user = await client.parse_id_token(token, nonce="n", claims_options=claims_options)
+    assert user.sub == "123"
+
+    with pytest.raises(InvalidClaimError):
+        claims_options = {"iss": {"value": "https://wrong-provider.test"}}
+        await client.parse_id_token(token, nonce="n", claims_options=claims_options)
+
+
+@pytest.mark.parametrize("token_nonce", [None, "wrong", "n"])
+@pytest.mark.asyncio
+async def test_parse_id_token_nonce_supported(token_nonce):
+    token = get_bearer_token()
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "auth_time": now,
+        "exp": now + 3600,
+        "nonce_supported": False,
+        "at_hash": create_half_hash(token["access_token"], "HS256").decode("utf-8"),
+    }
+    if token_nonce is not None:
+        claims["nonce"] = token_nonce
+    id_token = jwt.encode({"alg": "HS256"}, claims, secret_key)
+    token["id_token"] = id_token
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        fetch_token=get_bearer_token,
+        jwks={"keys": [secret_key.as_dict()]},
+        issuer="https://provider.test",
+        id_token_signing_alg_values_supported=["HS256", "RS256"],
+    )
+    if token_nonce == "n":
+        assert (await client.parse_id_token(token, nonce="n")).sub == "123"
+    else:
+        error = MissingClaimError if token_nonce is None else InvalidClaimError
+        with pytest.raises(error):
+            await client.parse_id_token(token, nonce="n")
+
+    assert (await client.parse_id_token(token, nonce=None)).sub == "123"
+
+
+@pytest.mark.asyncio
+async def test_runtime_error_fetch_jwks_uri():
+    token = get_bearer_token()
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "auth_time": now,
+        "exp": now + 3600,
+        "nonce": "n",
+        "at_hash": create_half_hash(token["access_token"], "HS256").decode("utf-8"),
+    }
+    id_token = jwt.encode({"alg": "HS256"}, claims, secret_key)
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        fetch_token=get_bearer_token,
+        issuer="https://provider.test",
+        id_token_signing_alg_values_supported=["HS256"],
+    )
+    token["id_token"] = id_token
+    with pytest.raises(RuntimeError):
+        await client.parse_id_token(token, nonce="n")
+
+
+@pytest.mark.asyncio
+async def test_force_fetch_jwks_uri():
+    secret_keys = KeySet.import_key_set(read_key_file("jwks_private.json"))
+    token = get_bearer_token()
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "auth_time": now,
+        "exp": now + 3600,
+        "nonce": "n",
+        "at_hash": create_half_hash(token["access_token"], "RS256").decode("utf-8"),
+    }
+    id_token = jwt.encode({"alg": "RS256"}, claims, secret_keys)
+    token["id_token"] = id_token
+
+    transport = ASGITransport(
+        AsyncPathMapDispatch({"/jwks": {"body": read_key_file("jwks_public.json")}})
+    )
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        fetch_token=get_bearer_token,
+        jwks={"keys": [secret_key.as_dict()]},
+        jwks_uri="https://provider.test/jwks",
+        issuer="https://provider.test",
+        client_kwargs={
+            "transport": transport,
+        },
+    )
+    user = await client.parse_id_token(token, nonce="n")
+    assert user.sub == "123"
+
+
+@pytest.mark.filterwarnings("ignore::joserfc.errors.SecurityWarning")
+@pytest.mark.parametrize(
+    "alg,key,algorithms",
+    [("HS256", secret_key, None), ("none", None, ["RS256", "none"])],
+    ids=["default", "none"],
+)
+@pytest.mark.asyncio
+async def test_parse_id_token_refused_algorithm(alg, key, algorithms):
+    """Only RS256 is accepted by default, and none is always refused."""
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "exp": now + 3600,
+        "nonce": "n",
+    }
+    id_token = jwt.encode({"alg": alg}, claims, key, algorithms=[alg])
+    metadata = {}
+    if algorithms:
+        metadata["id_token_signing_alg_values_supported"] = algorithms
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        jwks={"keys": [secret_key.as_dict()]},
+        issuer="https://provider.test",
+        **metadata,
+    )
+    with pytest.raises(UnsupportedAlgorithmError):
+        await client.parse_id_token({"id_token": id_token}, nonce="n")
+
+
+@pytest.mark.asyncio
+async def test_parse_id_token_claims_options_keep_issuer():
+    """Claims options without iss keep the issuer check."""
+    now = int(time.time())
+    claims = {
+        "sub": "123",
+        "iss": "https://other.test",
+        "aud": "dev",
+        "iat": now,
+        "exp": now + 3600,
+        "nonce": "n",
+    }
+    id_token = jwt.encode({"alg": "HS256"}, claims, secret_key)
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        jwks={"keys": [secret_key.as_dict()]},
+        issuer="https://provider.test",
+        id_token_signing_alg_values_supported=["HS256"],
+    )
+    with pytest.raises(InvalidClaimError):
+        await client.parse_id_token(
+            {"id_token": id_token},
+            nonce="n",
+            claims_options={"email": {"essential": False}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_parse_id_token_unknown_kid_refresh_interval():
+    """An unknown kid fetches the JWK set again at most once per interval."""
+    now = int(time.time())
+    claims = {"sub": "123", "iss": "https://provider.test", "aud": "dev"}
+    claims.update({"iat": now, "exp": now + 3600, "nonce": "n"})
+    id_token = jwt.encode({"alg": "HS256", "kid": "unknown"}, claims, secret_key)
+    fetches = []
+    transport = ASGITransport(
+        AsyncPathMapDispatch(
+            {"/jwks": {"body": {"keys": [secret_key.as_dict()]}}},
+            side_effects={"/jwks": fetches.append},
+        )
+    )
+
+    oauth = OAuth()
+    client = oauth.register(
+        "dev",
+        client_id="dev",
+        client_secret="dev",
+        jwks={"keys": [secret_key.as_dict()]},
+        jwks_uri="https://provider.test/jwks",
+        issuer="https://provider.test",
+        id_token_signing_alg_values_supported=["HS256"],
+        client_kwargs={"transport": transport},
+    )
+    for _ in range(3):
+        with pytest.raises(InvalidKeyIdError):
+            await client.parse_id_token({"id_token": id_token}, nonce="n")
+    assert len(fetches) == 1
+
+    client._jwk_set_refreshed_at -= client.jwks_refresh_interval
+    with pytest.raises(InvalidKeyIdError):
+        await client.parse_id_token({"id_token": id_token}, nonce="n")
+    assert len(fetches) == 2

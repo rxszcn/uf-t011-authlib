@@ -1,0 +1,153 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Authlib"
+description = "The ultimate Python library in building OAuth and OpenID Connect servers and clients."
+authors = [{name = "Hsiaoming Yang", email="me@lepture.com"}]
+maintainers = [
+    {name = "Hsiaoming Yang", email = "me@lepture.com"},
+    {name = "Éloi Rivard", email = "eloi@yaal.coop"},
+]
+dependencies = [
+    "cryptography>=45.0.1",
+    "joserfc>=1.6.8",
+]
+license = "BSD-3-Clause"
+requires-python = ">=3.11"
+dynamic = ["version"]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+]
+
+[project.urls]
+Documentation = "https://docs.authlib.org/"
+Purchase = "https://authlib.org/plans"
+Issues = "https://github.com/authlib/authlib/issues"
+Source = "https://github.com/authlib/authlib"
+Donate = "https://github.com/sponsors/lepture"
+Blog = "https://blog.authlib.org/"
+
+[dependency-groups]
+dev = [
+    "coverage>=7.0",
+    "diff-cover>=9.6.0",
+    "prek>=0.1.3",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=7.1.0",
+    "pytest-env>=1.0",
+    "pytest-xdist>=3.8.0",
+    "scriv[toml]>=1.8.0",
+    "sybil>=10.1",
+    "tox-uv >= 1.16.0",
+]
+
+clients = [
+    {include-group = "flask"},
+    {include-group = "django"},
+    "anyio>=3.4",
+    "cachelib>=0.9",
+    "httpx2>=2.0",
+    "requests>=2.27",
+    "starlette[full]>=0.24",
+]
+
+django = [
+    "django>=3.2.9",
+    "pytest-django>=4.5",
+]
+
+flask = [
+    "Flask>=3.0",
+    "Flask-SQLAlchemy>=3.0.2",
+]
+
+jose = [
+    "pycryptodomex>=3.10,<4",
+]
+
+docs = [
+    "shibuya>=2024.1.0",
+    "sphinx>=7.0",
+    "sphinx-design>=0.5",
+    "sphinx-copybutton>=0.5",
+    "sphinxcontrib-mermaid>=2.1",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "authlib.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["authlib", "authlib.*"]
+
+[tool.scriv]
+format = "rst"
+changelog = "docs/upgrades/changelog.rst"
+version = "literal: authlib/consts.py: version"
+categories = ["Breaking changes", "Added", "Changed", "Deprecated", "Fixed", "Security"]
+rst_header_chars = "-~"
+compact_fragments = true
+entry_title_template = "Version {{ version }} — {{ date.strftime('%Y-%m-%d') }}"
+
+[tool.ruff.lint]
+select = [
+    "B", # flake8-bugbear
+    "E", # pycodestyle
+    "F", # pyflakes
+    "I", # isort
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line-too-long
+    "E722", # bare-except
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+norecursedirs = ["authlib", "build", "dist", "docs", "htmlcov"]
+pythonpath = ["."]
+env = [
+    "DJANGO_SETTINGS_MODULE = tests.django_settings",
+]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "except ImportError",
+    "def __repr__",
+    "raise NotImplementedError",
+    "raise DeprecationWarning",
+    "deprecate",
+    "if TYPE_CHECKING:",
+]

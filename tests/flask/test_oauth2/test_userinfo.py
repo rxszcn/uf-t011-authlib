@@ -1,0 +1,468 @@
+import pytest
+from flask import json
+from joserfc import jwt
+from joserfc.jwk import KeySet
+
+import authlib.oidc.core as oidc_core
+from authlib.deprecate import AuthlibDeprecationWarning
+from authlib.integrations.flask_oauth2 import ResourceProtector
+from authlib.integrations.sqla_oauth2 import create_bearer_token_validator
+from authlib.oauth2.rfc6750 import FormEncodedBodyToken
+from tests.util import read_file_path
+
+from .models import Token
+
+
+@pytest.fixture(autouse=True)
+def server(server, app, db):
+    class UserInfoEndpoint(oidc_core.UserInfoEndpoint):
+        def get_issuer(self) -> str:
+            return "https://provider.test"
+
+        def generate_user_info(self, user, scope):
+            return user.generate_user_info().filter(scope)
+
+        def resolve_private_key(self):
+            return KeySet.import_key_set(read_file_path("jwks_private.json"))
+
+    BearerTokenValidator = create_bearer_token_validator(db.session, Token)
+    resource_protector = ResourceProtector()
+    resource_protector.register_token_validator(BearerTokenValidator())
+    resource_protector.register_extension(FormEncodedBodyToken())
+    server.register_endpoint(UserInfoEndpoint(resource_protector=resource_protector))
+
+    @app.route("/oauth/userinfo", methods=["GET", "POST"])
+    def userinfo():
+        return server.create_endpoint_response("userinfo")
+
+    return server
+
+
+@pytest.fixture(autouse=True)
+def client(client, db):
+    client.set_client_metadata(
+        {
+            "scope": "profile",
+            "redirect_uris": ["https://client.test/authorized"],
+        }
+    )
+    db.session.add(client)
+    db.session.commit()
+    return client
+
+
+@pytest.fixture(autouse=True)
+def token(db):
+    token = Token(
+        user_id=1,
+        client_id="client-id",
+        token_type="bearer",
+        access_token="access-token",
+        refresh_token="r1",
+        scope="openid",
+        expires_in=3600,
+    )
+    db.session.add(token)
+    db.session.commit()
+    yield token
+    db.session.delete(token)
+
+
+def test_get(test_client, db, token):
+    """The UserInfo Endpoint MUST support the use of the HTTP GET and HTTP POST methods defined in RFC 7231 [RFC7231].
+    The UserInfo Endpoint MUST accept Access Tokens as OAuth 2.0 Bearer Token Usage [RFC6750]."""
+
+    token.scope = "openid profile email address phone"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    assert rv.headers["Content-Type"] == "application/json"
+
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "address": {
+            "country": "USA",
+            "formatted": "742 Evergreen Terrace, Springfield",
+            "locality": "Springfield",
+            "postal_code": "1245",
+            "region": "Unknown",
+            "street_address": "742 Evergreen Terrace",
+        },
+        "birthdate": "2000-12-01",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+        "family_name": "Doe",
+        "gender": "female",
+        "given_name": "Jane",
+        "locale": "fr-FR",
+        "middle_name": "Middle",
+        "name": "foo",
+        "nickname": "Jany",
+        "phone_number": "+1 (425) 555-1212",
+        "phone_number_verified": False,
+        "picture": "https://resource.test/janedoe/me.jpg",
+        "preferred_username": "j.doe",
+        "profile": "https://resource.test/janedoe",
+        "updated_at": 1745315119,
+        "website": "https://resource.test",
+        "zoneinfo": "Europe/Paris",
+    }
+
+
+def test_post(test_client, db, token):
+    """The UserInfo Endpoint MUST support the use of the HTTP GET and HTTP POST methods defined in RFC 7231 [RFC7231].
+    The UserInfo Endpoint MUST accept Access Tokens as OAuth 2.0 Bearer Token Usage [RFC6750]."""
+
+    token.scope = "openid profile email address phone"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.post("/oauth/userinfo", headers=headers)
+    assert rv.headers["Content-Type"] == "application/json"
+
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "address": {
+            "country": "USA",
+            "formatted": "742 Evergreen Terrace, Springfield",
+            "locality": "Springfield",
+            "postal_code": "1245",
+            "region": "Unknown",
+            "street_address": "742 Evergreen Terrace",
+        },
+        "birthdate": "2000-12-01",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+        "family_name": "Doe",
+        "gender": "female",
+        "given_name": "Jane",
+        "locale": "fr-FR",
+        "middle_name": "Middle",
+        "name": "foo",
+        "nickname": "Jany",
+        "phone_number": "+1 (425) 555-1212",
+        "phone_number_verified": False,
+        "picture": "https://resource.test/janedoe/me.jpg",
+        "preferred_username": "j.doe",
+        "profile": "https://resource.test/janedoe",
+        "updated_at": 1745315119,
+        "website": "https://resource.test",
+        "zoneinfo": "Europe/Paris",
+    }
+
+
+def test_post_token_in_body(test_client, db, token):
+    token.scope = "openid profile email address phone"
+    db.session.add(token)
+    db.session.commit()
+
+    rv = test_client.post(
+        "/oauth/userinfo",
+        data={"access_token": "access-token"},
+    )
+    assert rv.headers["Content-Type"] == "application/json"
+
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "address": {
+            "country": "USA",
+            "formatted": "742 Evergreen Terrace, Springfield",
+            "locality": "Springfield",
+            "postal_code": "1245",
+            "region": "Unknown",
+            "street_address": "742 Evergreen Terrace",
+        },
+        "birthdate": "2000-12-01",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+        "family_name": "Doe",
+        "gender": "female",
+        "given_name": "Jane",
+        "locale": "fr-FR",
+        "middle_name": "Middle",
+        "name": "foo",
+        "nickname": "Jany",
+        "phone_number": "+1 (425) 555-1212",
+        "phone_number_verified": False,
+        "picture": "https://resource.test/janedoe/me.jpg",
+        "preferred_username": "j.doe",
+        "profile": "https://resource.test/janedoe",
+        "updated_at": 1745315119,
+        "website": "https://resource.test",
+        "zoneinfo": "Europe/Paris",
+    }
+
+
+def test_no_token(test_client):
+    rv = test_client.post("/oauth/userinfo")
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+    assert rv.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_missing_token_type(test_client):
+    headers = {"Authorization": "token_string"}
+    rv = test_client.post("/oauth/userinfo", headers=headers)
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+
+
+def test_token_in_header_and_body(test_client, token):
+    """Sending the access token both in the header and in the body is refused."""
+    rv = test_client.post(
+        "/oauth/userinfo",
+        headers={"Authorization": "Bearer access-token"},
+        data={"access_token": "access-token"},
+    )
+    assert rv.status_code == 400
+    resp = json.loads(rv.data)
+    assert resp["error"] == "invalid_request"
+
+
+def test_token_in_body_with_get(test_client, token):
+    """The access token cannot be sent in the body of a GET request."""
+    rv = test_client.get(
+        "/oauth/userinfo",
+        data="access_token=access-token",
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+
+
+def test_token_in_multipart_body(test_client, token):
+    """The access token cannot be sent in a multipart body."""
+    rv = test_client.post(
+        "/oauth/userinfo",
+        data={"access_token": "access-token"},
+        content_type="multipart/form-data",
+    )
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+
+
+def test_token_in_json_body(test_client, token):
+    """The access token cannot be sent in a JSON body."""
+    rv = test_client.post("/oauth/userinfo", json={"access_token": "access-token"})
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+
+
+def test_bad_token(test_client):
+    headers = {"Authorization": "invalid token_string"}
+    rv = test_client.post("/oauth/userinfo", headers=headers)
+    assert rv.status_code == 401
+    resp = json.loads(rv.data)
+    assert "error" not in resp
+    assert rv.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_token_without_user(test_client, db, token):
+    """A token without a user is rejected."""
+    token.user_id = None
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    assert rv.status_code == 401
+    assert json.loads(rv.data)["error"] == "invalid_token"
+
+
+def test_token_has_bad_scope(test_client, db, token):
+    """Test that tokens without 'openid' scope cannot access the userinfo endpoint."""
+
+    token.scope = "foobar"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.post("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp["error"] == "insufficient_scope"
+
+
+def test_scope_minimum(test_client):
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+    }
+
+
+def test_scope_profile(test_client, db, token):
+    token.scope = "openid profile"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "birthdate": "2000-12-01",
+        "family_name": "Doe",
+        "gender": "female",
+        "given_name": "Jane",
+        "locale": "fr-FR",
+        "middle_name": "Middle",
+        "name": "foo",
+        "nickname": "Jany",
+        "picture": "https://resource.test/janedoe/me.jpg",
+        "preferred_username": "j.doe",
+        "profile": "https://resource.test/janedoe",
+        "updated_at": 1745315119,
+        "website": "https://resource.test",
+        "zoneinfo": "Europe/Paris",
+    }
+
+
+def test_scope_address(test_client, db, token):
+    token.scope = "openid address"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "address": {
+            "country": "USA",
+            "formatted": "742 Evergreen Terrace, Springfield",
+            "locality": "Springfield",
+            "postal_code": "1245",
+            "region": "Unknown",
+            "street_address": "742 Evergreen Terrace",
+        },
+    }
+
+
+def test_scope_email(test_client, db, token):
+    token.scope = "openid email"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+    }
+
+
+def test_scope_phone(test_client, db, token):
+    token.scope = "openid phone"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    resp = json.loads(rv.data)
+    assert resp == {
+        "sub": "1",
+        "phone_number": "+1 (425) 555-1212",
+        "phone_number_verified": False,
+    }
+
+
+@pytest.mark.skip
+def test_scope_signed_unsecured(test_client, db, token, client):
+    """When userinfo_signed_response_alg is set as client metadata, the userinfo response must be a JWT."""
+    client.set_client_metadata(
+        {
+            "scope": "profile",
+            "redirect_uris": ["https://client.test/authorized"],
+            "userinfo_signed_response_alg": "none",
+        }
+    )
+    db.session.add(client)
+    db.session.commit()
+
+    token.scope = "openid email"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    assert rv.headers["Content-Type"] == "application/jwt"
+
+    # specify that we support "none"
+    token = jwt.decode(rv.data, None, algorithms=["none"])
+    assert token.claims == {
+        "sub": "1",
+        "iss": "https://provider.test",
+        "aud": "client-id",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+    }
+
+
+def test_scope_signed_secured(test_client, client, token, db):
+    """When userinfo_signed_response_alg is set as client metadata and not none, the userinfo response must be signed."""
+    client.set_client_metadata(
+        {
+            "scope": "profile",
+            "redirect_uris": ["https://client.test/authorized"],
+            "userinfo_signed_response_alg": "RS256",
+        }
+    )
+    db.session.add(client)
+    db.session.commit()
+
+    token.scope = "openid email"
+    db.session.add(token)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    rv = test_client.get("/oauth/userinfo", headers=headers)
+    assert rv.headers["Content-Type"] == "application/jwt"
+
+    pub_key = KeySet.import_key_set(read_file_path("jwks_public.json"))
+    token = jwt.decode(rv.data, pub_key)
+    assert token.claims == {
+        "sub": "1",
+        "iss": "https://provider.test",
+        "aud": "client-id",
+        "email": "janedoe@example.com",
+        "email_verified": True,
+    }
+
+
+def test_scope_signed_jwks_dict(test_client, client, token, db, server, monkeypatch):
+    """A JWKS dict is still accepted by 'resolve_private_key' but deprecated."""
+    endpoint = server._endpoints[oidc_core.UserInfoEndpoint.ENDPOINT_NAME][0]
+    monkeypatch.setattr(
+        endpoint, "resolve_private_key", lambda: read_file_path("jwks_private.json")
+    )
+    client.set_client_metadata(
+        {
+            "scope": "profile",
+            "redirect_uris": ["https://client.test/authorized"],
+            "userinfo_signed_response_alg": "RS256",
+        }
+    )
+    db.session.add(client)
+    db.session.commit()
+
+    headers = {"Authorization": "Bearer access-token"}
+    with pytest.warns(AuthlibDeprecationWarning, match="KeySet.import_key_set"):
+        rv = test_client.get("/oauth/userinfo", headers=headers)
+
+    pub_key = KeySet.import_key_set(read_file_path("jwks_public.json"))
+    token = jwt.decode(rv.data, pub_key)
+    assert token.claims["sub"] == "1"

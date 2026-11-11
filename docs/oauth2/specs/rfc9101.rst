@@ -1,0 +1,145 @@
+.. _specs/rfc9101:
+
+RFC 9101: The OAuth 2.0 Authorization Framework: JWT-Secured Authorization Request (JAR)
+========================================================================================
+
+This section contains the generic implementation of :rfc:`9101`.
+
+This specification describe how to pass the authorization request payload
+in a JWT (called *request object*) instead of directly instead of GET or POST params.
+
+The request object can either be passed directly in a ``request`` parameter,
+or be hosted by the client and be passed by reference with a ``request_uri``
+parameter. By reference, the Authorization Server fetches the request object
+itself:
+
+.. mermaid::
+
+    sequenceDiagram
+        autonumber
+        participant User as User's browser<br/>(User Agent)
+        participant Client
+        box rgba(80, 120, 220, 0.12) JWTAuthenticationRequest
+            participant AS as Authorization Server
+        end
+
+        Note over Client: Signs a request object
+        Client-->>User: 302 Found → /authorize
+        User->>AS: GET /authorize (request or request_uri)
+        opt By reference
+            AS->>Client: GET request_uri
+            Client-->>AS: 200 OK + request object
+        end
+        Note over AS: Verifies the request object
+        Note over User,AS: The user logs in and approves
+        AS-->>User: 303 See Other → redirect_uri?code=…
+
+1. The client signs a JWT that contains the authorization request
+   parameters. It redirects the browser to the authorization endpoint.
+2. The request contains ``client_id``, and either the JWT as ``request``, or
+   its URL as ``request_uri``. :class:`JWTAuthenticationRequest` rejects the
+   request if both are present.
+3. With ``request_uri`` only. ``validate_request_uri`` decides whether the
+   server may fetch this URL for this client. It rejects every URL by
+   default. ``get_request_object`` then fetches the JWT. See `Retrieving
+   request objects`_.
+4. The client returns the JWT.
+5. In both cases, :class:`JWTAuthenticationRequest` checks the JWT
+   signature with the client key, the signing algorithm, and that the
+   ``client_id`` claim matches the ``client_id`` parameter. The claims of
+   the JWT then replace the request parameters, and the authorization flow
+   goes on as usual.
+
+The ``/authorize`` path is an example.
+
+This usage is more secure than passing the request payload directly in the request,
+read the RFC to know all the details.
+
+Request objects are optional, unless it is enforced by clients with the
+``require_signed_request_object`` client metadata, or server-wide with the
+``require_signed_request_object`` server metadata.
+
+Signature policy
+----------------
+
+When either the server or client requires signed request objects,
+``alg=none`` is rejected even if it appears in the server's supported algorithm
+list or is returned by ``get_request_object_signing_algorithms()``. Unsigned
+request objects remain supported when signatures are optional and the algorithm
+configuration permits ``none``.
+
+Retrieving request objects
+--------------------------
+
+Implement ``validate_request_uri(request_uri, client)`` with an explicit policy
+for the request objects your server can safely retrieve. The default rejects all
+URIs, including URIs present in client metadata. Validation runs before
+``get_request_object()`` is called; rejected URIs return ``invalid_request_uri``:
+
+.. code-block:: python
+
+    class JWTAuthenticationRequest(rfc9101.JWTAuthenticationRequest):
+        def validate_request_uri(self, request_uri, client):
+            return is_approved_request_uri(request_uri, client)
+
+``is_approved_request_uri`` is an application function: it must authorize the
+reference for this client and enforce the destination restrictions described
+below. Merely checking whether a URI was supplied by a client is insufficient.
+Applications using references to locally stored objects, such as URNs, must
+validate that those objects belong to the requesting client.
+
+The generic JAR extension does not implement OIDC URI registration. OIDC providers
+should use :class:`authlib.oidc.core.OpenIDJWTAuthenticationRequest`; see
+:ref:`oidc_request_objects`. It checks ``require_request_uri_registration`` and
+registered ``request_uris`` independently of the application's retrieval policy.
+
+For network retrieval, validate destinations during URI registration. Untrusted
+client metadata is not an approval policy. Require HTTPS, reject credentials in
+URLs, and restrict both hostnames and the IP addresses actually used for outbound
+connections. Block loopback, private, link-local, and other non-public destinations.
+Checking DNS once before an unrestricted HTTP request does not prevent DNS
+rebinding: the transport or network must enforce the destination restrictions.
+
+Disable redirects, set connection and read timeouts, enforce an overall retrieval
+deadline and response size limit, and require the response media type
+``application/oauth-authz-req+jwt``. The ``get_request_object()`` API documentation
+below includes an example of HTTP response limits. These safeguards apply even
+to registered URIs, whose DNS records can change. JWT signature validation occurs
+after retrieval and cannot prevent SSRF from the retrieval itself.
+
+.. _jar-consent-retention:
+
+Request objects during consent
+------------------------------
+
+The authorization view usually calls ``get_consent_grant`` twice: once to show
+the consent page, and once to handle the answer of the user. With
+``request_uri``, each call fetches the request object again. The client can
+return a different document the second time, for instance with a wider scope.
+Both documents have a valid signature, but the user only approved the first
+one.
+
+Per OpenID Connect Core §6.2, servers may cache the request object. Keep the
+first request object, for instance in the session of the user, and return it
+from ``get_request_object`` when the same ``request_uri`` comes back. Remove
+it when the authorization ends. If it has expired, start a new authorization
+instead of fetching the document again.
+
+Authlib does not keep request objects yet, see :issue:`971`.
+
+API Reference
+-------------
+
+.. module:: authlib.oauth2.rfc9101
+
+.. autoclass:: JWTAuthenticationRequest
+    :member-order: bysource
+    :members:
+
+.. autoclass:: ClientMetadataClaims
+    :member-order: bysource
+    :members:
+
+.. autoclass:: AuthorizationServerMetadata
+    :member-order: bysource
+    :members:

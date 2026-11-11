@@ -1,0 +1,38 @@
+.. _specs/rfc7516:
+
+RFC7516: JSON Web Encryption
+============================
+
+.. deprecated:: 1.7
+    ``authlib.jose`` will be removed in Authlib 2.0. Use joserfc_ instead.
+    :ref:`joserfc_upgrade` explains how to migrate.
+
+.. _joserfc: https://jose.authlib.org/en/
+
+.. meta::
+    :description: API references on RFC7516 JSON Web Encryption (JWE) Python
+        implementation. Guide on JWE serialization and deserialization.
+
+This section contains the generic implementation of :rfc:`7516`. Find how to use
+it in :ref:`JWE Guide <jwe_guide>`.
+
+
+API Reference
+-------------
+
+.. autoclass:: authlib.jose.JsonWebEncryption
+    :member-order: bysource
+    :members:
+
+
+.. autoclass:: authlib.jose.JWEAlgorithm
+    :member-order: bysource
+    :members:
+
+.. autoclass:: authlib.jose.JWEEncAlgorithm
+    :member-order: bysource
+    :members:
+
+.. autoclass:: authlib.jose.JWEZipAlgorithm
+    :member-order: bysource
+    :members:

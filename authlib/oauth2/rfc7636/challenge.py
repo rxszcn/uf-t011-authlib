@@ -1,0 +1,202 @@
+import hashlib
+import hmac
+import re
+
+from authlib.common.encoding import to_bytes
+from authlib.common.encoding import to_unicode
+from authlib.common.encoding import urlsafe_b64encode
+from authlib.deprecate import deprecate
+
+from ..rfc6749 import InvalidGrantError
+from ..rfc6749 import InvalidRequestError
+from ..rfc6749 import OAuth2Request
+
+CODE_VERIFIER_PATTERN = re.compile(r"^[a-zA-Z0-9\-._~]{43,128}$")
+CODE_CHALLENGE_PATTERN = re.compile(r"^[a-zA-Z0-9\-._~]{43,128}$")
+
+
+def create_s256_code_challenge(code_verifier):
+    """Create S256 code_challenge with the given code_verifier."""
+    data = hashlib.sha256(to_bytes(code_verifier, "ascii")).digest()
+    return to_unicode(urlsafe_b64encode(data))
+
+
+def compare_plain_code_challenge(code_verifier, code_challenge):
+    # If the "code_challenge_method" from Section 4.3 was "plain",
+    # they are compared directly
+    return hmac.compare_digest(to_bytes(code_verifier), to_bytes(code_challenge))
+
+
+def compare_s256_code_challenge(code_verifier, code_challenge):
+    # BASE64URL-ENCODE(SHA256(ASCII(code_verifier))) == code_challenge
+    return hmac.compare_digest(
+        to_bytes(create_s256_code_challenge(code_verifier)), to_bytes(code_challenge)
+    )
+
+
+class CodeChallenge:
+    """CodeChallenge extension to Authorization Code Grant. It is used to
+    improve the security of Authorization Code flow for public clients by
+    sending extra "code_challenge" and "code_verifier" to the authorization
+    server.
+
+    The AuthorizationCodeGrant SHOULD save the ``code_challenge`` and
+    ``code_challenge_method`` into database when ``save_authorization_code``.
+    Then register this extension via::
+
+        server.register_grant(AuthorizationCodeGrant, [CodeChallenge()])
+
+    To change which clients must use PKCE, override
+    :meth:`is_code_challenge_required`.
+    """
+
+    #: defaults to "plain" if not present in the request
+    DEFAULT_CODE_CHALLENGE_METHOD = "plain"
+    #: supported ``code_challenge_method``
+    SUPPORTED_CODE_CHALLENGE_METHOD = ["plain", "S256"]
+
+    CODE_CHALLENGE_METHODS = {
+        "plain": compare_plain_code_challenge,
+        "S256": compare_s256_code_challenge,
+    }
+
+    def __init__(self, required=None):
+        if required is not None:
+            deprecate(
+                "The 'required' parameter of 'CodeChallenge' is deprecated. "
+                "Override 'is_code_challenge_required' instead.",
+                version="1.11",
+            )
+
+        self.required = True if required is None else required
+
+    def __call__(self, grant):
+        grant.register_authorization_parameters(
+            {"code_challenge": str, "code_challenge_method": str}
+        )
+        grant.register_hook(
+            self.validate_code_challenge,
+            after=grant.validate_authorization_request_payload,
+        )
+        grant.register_hook(
+            self.validate_code_verifier,
+            after=grant.validate_token_request,
+        )
+
+    def validate_code_challenge(self, grant, redirect_uri):
+        request: OAuth2Request = grant.request
+        challenge = request.payload.data.get("code_challenge")
+        method = request.payload.data.get("code_challenge_method")
+        if not challenge and not method:
+            # Per RFC 7636 §4.4.1, a server that requires PKCE for public
+            # clients rejects a request without code_challenge.
+            if self.is_code_challenge_required(request):
+                raise InvalidRequestError("Missing 'code_challenge'")
+
+            return
+
+        if not challenge:
+            raise InvalidRequestError("Missing 'code_challenge'")
+
+        if len(request.payload.datalist.get("code_challenge", [])) > 1:
+            raise InvalidRequestError("Multiple 'code_challenge' in request.")
+
+        if not CODE_CHALLENGE_PATTERN.match(challenge):
+            raise InvalidRequestError("Invalid 'code_challenge'")
+
+        # Per RFC 7636 §4.3, a missing code_challenge_method means "plain".
+        method = method or self.DEFAULT_CODE_CHALLENGE_METHOD
+        if method not in self.SUPPORTED_CODE_CHALLENGE_METHOD:
+            raise InvalidRequestError("Unsupported 'code_challenge_method'")
+
+        if len(request.payload.datalist.get("code_challenge_method", [])) > 1:
+            raise InvalidRequestError("Multiple 'code_challenge_method' in request.")
+
+    def validate_code_verifier(self, grant, result):
+        request: OAuth2Request = grant.request
+        verifier = request.form.get("code_verifier")
+
+        if not verifier and self.is_code_challenge_required(request):
+            raise InvalidRequestError("Missing 'code_verifier'")
+
+        authorization_code = request.authorization_code
+        challenge = self.get_authorization_code_challenge(authorization_code)
+
+        # ignore, it is the normal RFC6749 authorization_code request
+        if not challenge and not verifier:
+            return
+
+        # RFC 9700 Section 4.8: the authorization server MUST ensure that if
+        # there was no code_challenge in the authorization request, a request
+        # to the token endpoint containing a code_verifier is rejected.
+        if not challenge and verifier:
+            raise InvalidRequestError(
+                "The authorization request had no 'code_challenge', "
+                "but a 'code_verifier' was provided."
+            )
+
+        # challenge exists, code_verifier is required
+        if not verifier:
+            raise InvalidRequestError("Missing 'code_verifier'")
+
+        if not CODE_VERIFIER_PATTERN.match(verifier):
+            raise InvalidRequestError("Invalid 'code_verifier'")
+
+        # 4.6. Server Verifies code_verifier before Returning the Tokens
+        method = self.get_authorization_code_challenge_method(authorization_code)
+        if method is None:
+            method = self.DEFAULT_CODE_CHALLENGE_METHOD
+
+        func = self.CODE_CHALLENGE_METHODS.get(method)
+        if not func:
+            raise RuntimeError(f"No verify method for '{method}'")
+
+        # If the values are not equal, an error response indicating
+        # "invalid_grant" MUST be returned.
+        if not func(verifier, challenge):
+            raise InvalidGrantError(description="Code challenge failed.")
+
+    def is_code_challenge_required(self, request):
+        """Tell whether the client must use PKCE for this request.
+
+        It is called at the authorization endpoint and at the token endpoint.
+        For a given code, it must give the same answer at both endpoints.
+        Otherwise a code issued without ``code_challenge`` is rejected at the
+        token endpoint. At the token endpoint, ``request.authorization_code``
+        is available.
+
+        By default, public clients must use PKCE. Developers MAY re-implement
+        it in subclass. For example, to require PKCE for all clients::
+
+            def is_code_challenge_required(self, request):
+                return True
+
+        :param request: the OAuth2Request instance, with its ``client``
+        :return: bool
+        """
+        if not self.required:
+            return False
+
+        return request.client.check_endpoint_auth_method("none", "token")
+
+    def get_authorization_code_challenge(self, authorization_code):
+        """Get "code_challenge" associated with this authorization code.
+        Developers MAY re-implement it in subclass, the default logic::
+
+            def get_authorization_code_challenge(self, authorization_code):
+                return authorization_code.code_challenge
+
+        :param authorization_code: the instance of authorization_code
+        """
+        return authorization_code.code_challenge
+
+    def get_authorization_code_challenge_method(self, authorization_code):
+        """Get "code_challenge_method" associated with this authorization code.
+        Developers MAY re-implement it in subclass, the default logic::
+
+            def get_authorization_code_challenge_method(self, authorization_code):
+                return authorization_code.code_challenge_method
+
+        :param authorization_code: the instance of authorization_code
+        """
+        return authorization_code.code_challenge_method

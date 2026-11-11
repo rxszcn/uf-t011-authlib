@@ -1,0 +1,30 @@
+.. _specs/rfc7519:
+
+RFC7519: JSON Web Token
+=======================
+
+.. deprecated:: 1.7
+    ``authlib.jose`` will be removed in Authlib 2.0. Use joserfc_ instead.
+    :ref:`joserfc_upgrade` explains how to migrate.
+
+.. _joserfc: https://jose.authlib.org/en/
+
+.. meta::
+    :description: API references on RFC7519 JSON Web Token (JWT) Python
+        implementation, guide on JWT encoding and decoding, guide on JWT
+        payload claims validation.
+
+This section contains the generic Python implementation of :rfc:`7519`. Find how to use
+it in :ref:`JWT Guide <jwt_guide>`.
+
+API Reference
+-------------
+
+.. autoclass:: authlib.jose.JsonWebToken
+    :member-order: bysource
+    :members:
+
+
+.. autoclass:: authlib.jose.JWTClaims
+    :member-order: bysource
+    :members:

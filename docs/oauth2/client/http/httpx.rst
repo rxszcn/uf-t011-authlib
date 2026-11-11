@@ -1,0 +1,200 @@
+.. _httpx_client:
+
+
+OAuth 2.0 for HTTPX2
+====================
+
+.. meta::
+    :description: An OAuth 2.0 Client implementation for a next
+        generation HTTP client for Python, including support for OpenID Connect
+        and service account, powered by Authlib.
+
+.. module:: authlib.integrations.httpx_client
+    :noindex:
+
+HTTPX2 is a next-generation HTTP client for Python. Authlib enables OAuth 2.0
+for HTTPX2 with sync and async clients:
+
+* :class:`OAuth2Client` and :class:`AssertionClient` are sync.
+* :class:`AsyncOAuth2Client` and :class:`AsyncAssertionClient` are async.
+
+HTTPX2 OAuth 2.0
+----------------
+
+In :ref:`OAuth 2 Session <oauth_2_session>`, there are many grant types, including:
+
+1. Authorization Code Flow
+2. Implicit Flow
+3. Password Flow
+4. Client Credentials Flow
+
+And also, Authlib supports non Standard OAuth 2.0 providers via Compliance Fix.
+
+Read the common guide of :ref:`OAuth 2 Session <oauth_2_session>` to understand the whole OAuth
+2.0 flow.
+
+Using ``client_secret_jwt`` in HTTPX2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Here is how you could register and use ``client_secret_jwt`` client
+authentication method for HTTPX2:
+
+.. code-block:: python
+
+    from authlib.integrations.httpx_client import AsyncOAuth2Client
+    from authlib.oauth2.rfc7523 import ClientSecretJWT
+
+    client = AsyncOAuth2Client(
+        'your-client-id', 'your-client-secret',
+        token_endpoint_auth_method='client_secret_jwt'
+    )
+    token_endpoint = 'https://example.com/oauth/token'
+    client.register_client_auth_method(ClientSecretJWT(token_endpoint))
+    await client.fetch_token(token_endpoint)
+
+The ``ClientSecretJWT`` is provided by :ref:`specs/rfc7523`.
+
+
+Using ``private_key_jwt`` in HTTPX2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Here is how you could register and use ``private_key_jwt`` client
+authentication method for HTTPX2:
+
+.. skip: next "reads a private key file"
+
+.. code-block:: python
+
+    from authlib.integrations.httpx_client import AsyncOAuth2Client
+    from authlib.oauth2.rfc7523 import PrivateKeyJWT
+
+    with open('your-private-key.pem', 'rb') as f:
+        private_key = f.read()
+
+    client = AsyncOAuth2Client(
+        'your-client-id', private_key,
+        token_endpoint_auth_method='private_key_jwt',
+    )
+    token_endpoint = 'https://example.com/oauth/token'
+    client.register_client_auth_method(PrivateKeyJWT(token_endpoint))
+    await client.fetch_token(token_endpoint)
+
+The ``PrivateKeyJWT`` is provided by :ref:`specs/rfc7523`.
+
+
+Async OAuth 2.0
+---------------
+
+The async version of :class:`AsyncOAuth2Client` works the same as
+:ref:`OAuth 2 Session <oauth_2_session>`, except that we need to add ``await`` when
+required:
+
+.. code-block:: python
+
+    # fetching access token
+    token = await client.fetch_token(token_endpoint)
+
+    # normal requests
+    await client.get(url)
+    await client.post(url)
+    await client.put(url)
+    await client.delete(url)
+
+
+Auto Update Token
+~~~~~~~~~~~~~~~~~
+
+The :class:`AsyncOAuth2Client` also supports ``update_token`` parameter,
+the ``update_token`` can either be sync and async. For instance:
+
+.. code-block:: python
+
+    async def update_token(token, refresh_token=None, access_token=None):
+        if refresh_token:
+            item = await OAuth2Token.find(name=name, refresh_token=refresh_token)
+        elif access_token:
+            item = await OAuth2Token.find(name=name, access_token=access_token)
+        else:
+            return
+
+        # update old token
+        item.access_token = token['access_token']
+        item.refresh_token = token.get('refresh_token')
+        item.expires_at = token['expires_at']
+        await item.save()
+
+Then pass this ``update_token`` into ``AsyncOAuth2Client``.
+
+
+Async Service Account
+---------------------
+
+:class:`AsyncAssertionClient` is the async version for Assertion Framework of
+OAuth 2.0 Authorization Grants. It is also know as service account. A configured
+``AsyncAssertionClient`` will handle token authorization automatically,
+which means you can just use it.
+
+Take Google Service Account as an example, with the information in your
+service account JSON configure file:
+
+.. skip: next "reads a service account file"
+
+.. code-block:: python
+
+    import json
+    from authlib.integrations.httpx_client import AsyncAssertionClient
+
+    with open('MyProject-1234.json') as f:
+        conf = json.load(f)
+
+    token_uri = conf['token_uri']
+    header = {'alg': 'RS256'}
+    key_id = conf.get('private_key_id')
+    if key_id:
+        header['kid'] = key_id
+
+    # Google puts scope in payload
+    claims = {'scope': scope}
+
+    async def main():
+        client = AsyncAssertionClient(
+            token_endpoint=token_uri,
+            issuer=conf['client_email'],
+            audience=token_uri,
+            claims=claims,
+            subject=None,
+            key=conf['private_key'],
+            header=header,
+        )
+        resp = await client.get(...)
+        resp = await client.post(...)
+
+
+Close Client Hint
+-----------------
+
+Close an HTTPX2 Session when the jobs are done. Call ``.close()``, or use a
+``with`` context to close the session automatically:
+
+.. code-block:: python
+
+    client = OAuth2Client(client_id, client_secret, token=token)
+    client.get(url)
+    client.close()
+
+    with OAuth2Client(client_id, client_secret, token=token) as client:
+        client.get(url)
+
+For **async** OAuth Client, use ``await client.aclose()``:
+
+.. code-block:: python
+
+    client = AsyncOAuth2Client(client_id, client_secret, token=token)
+    await client.get(url)
+    await client.aclose()
+
+    async with AsyncOAuth2Client(client_id, client_secret, token=token) as client:
+        await client.get(url)
+
+Our :ref:`frameworks_clients` will close every session automatically, no need
+to worry.

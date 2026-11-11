@@ -1,0 +1,234 @@
+import time
+import urllib.parse
+from unittest import mock
+
+import pytest
+import requests
+from joserfc import jwt
+from joserfc.jwk import OctKey
+
+from authlib.integrations.requests_client import AssertionSession
+from tests.util import HMAC_SECRET
+
+hmac_key = OctKey.import_key(HMAC_SECRET)
+
+
+@pytest.fixture
+def token():
+    return {
+        "token_type": "Bearer",
+        "access_token": "a",
+        "refresh_token": "b",
+        "expires_in": "3600",
+        "expires_at": int(time.time()) + 3600,
+    }
+
+
+def test_refresh_token(token):
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            assert "assertion=" in r.body
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    # trigger more case
+    now = int(time.time())
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject=None,
+        audience="foo",
+        issued_at=now,
+        expires_at=now + 3600,
+        header={"alg": "HS256"},
+        key=hmac_key,
+        scope="email",
+        claims={"test_mode": "true"},
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+    # trigger for branch test case
+    sess.get("https://provider.test")
+
+
+def test_without_alg():
+    sess = AssertionSession(
+        "https://provider.test/token",
+        grant_type=AssertionSession.JWT_BEARER_GRANT_TYPE,
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        key=hmac_key,
+    )
+    with pytest.raises(ValueError):
+        sess.get("https://provider.test")
+
+
+def test_assertion_includes_default_jti(token):
+    """Verify that AssertionSession generates a jti in the JWT assertion."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 1
+    claims = jwt.decode(assertions[0], hmac_key).claims
+    assert "jti" in claims
+    assert len(claims["jti"]) == 36
+
+
+@pytest.mark.parametrize("claims", [None, {"test_mode": "true"}])
+def test_assertion_jti_is_unique_per_refresh(token, claims):
+    """Verify that each token refresh generates a new unique jti."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: {
+                **token,
+                "expires_in": "1",
+                "expires_at": int(time.time()) - 1,
+            }
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        claims=claims,
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 2
+    jti1 = jwt.decode(assertions[0], hmac_key).claims["jti"]
+    jti2 = jwt.decode(assertions[1], hmac_key).claims["jti"]
+    assert jti1
+    assert jti2
+    assert jti1 != jti2
+
+
+def test_assertion_custom_jti_is_preserved(token):
+    """Verify that a user-provided jti claim is not overwritten."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        claims={"jti": "my-custom-jti-value"},
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 1
+    claims = jwt.decode(assertions[0], hmac_key).claims
+    assert claims["jti"] == "my-custom-jti-value"
+
+
+def test_refresh_token_non_json_error_response():
+    def fake_send(r, **kwargs):
+        resp = requests.Response()
+        resp.status_code = 429
+        resp._content = b"429 Too Many Requests"
+        resp.url = r.url
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+    )
+    sess.send = fake_send
+    with pytest.raises(requests.HTTPError):
+        sess.refresh_token()
+
+
+def test_access_token_params(token):
+    """access_token_params are added to the token request."""
+    bodies = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            bodies.append(r.body)
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        access_token_params={
+            "resource": ["https://a.test/", "https://b.test/"],
+            "grant_type": "ignored",
+        },
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    params = urllib.parse.parse_qsl(bodies[0])
+    assert [v for k, v in params if k == "resource"] == [
+        "https://a.test/",
+        "https://b.test/",
+    ]
+    assert [v for k, v in params if k == "grant_type"] == [
+        "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    ]

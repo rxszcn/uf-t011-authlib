@@ -1,0 +1,45 @@
+.. _specs/rfc7517:
+
+RFC7517: JSON Web Key
+=====================
+
+.. deprecated:: 1.7
+    ``authlib.jose`` will be removed in Authlib 2.0. Use joserfc_ instead.
+    :ref:`joserfc_upgrade` explains how to migrate.
+
+.. _joserfc: https://jose.authlib.org/en/
+
+.. meta::
+    :description: API references on RFC7517 JSON Web Key (JWK) Authlib implementation.
+
+This section contains the generic implementation of :rfc:`7517`. Find how to use
+it in :ref:`JWK Guide <jwk_guide>`.
+
+
+API Reference
+-------------
+
+.. autoclass:: authlib.jose.JsonWebKey
+   :member-order: bysource
+   :members:
+
+
+.. autoclass:: authlib.jose.Key
+   :member-order: bysource
+   :members:
+
+.. autoclass:: authlib.jose.KeySet
+   :member-order: bysource
+   :members:
+
+.. autoclass:: authlib.jose.OctKey
+   :member-order: bysource
+   :members:
+
+.. autoclass:: authlib.jose.RSAKey
+   :member-order: bysource
+   :members:
+
+.. autoclass:: authlib.jose.ECKey
+   :member-order: bysource
+   :members:

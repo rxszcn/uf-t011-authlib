@@ -1,0 +1,671 @@
+import time
+from copy import deepcopy
+from unittest import mock
+
+import httpx2
+import pytest
+from httpx2 import WSGITransport
+
+from authlib.common.security import generate_token
+from authlib.common.urls import url_decode
+from authlib.common.urls import url_encode
+from authlib.integrations.base_client import MissingTokenError
+from authlib.integrations.httpx_client import OAuth2Client
+from authlib.integrations.httpx_client import OAuthError
+
+from ..wsgi_helper import MockDispatch
+
+default_token = {
+    "token_type": "Bearer",
+    "access_token": "a",
+    "refresh_token": "b",
+    "expires_in": "3600",
+    "expires_at": int(time.time()) + 3600,
+}
+
+
+def assert_token_in_header(request):
+    token = "Bearer " + default_token["access_token"]
+    auth_header = request.headers.get("authorization")
+    assert auth_header == token
+
+
+def assert_token_in_body(request):
+    content = request.data
+    content = content.decode()
+    assert content == "access_token={}".format(default_token["access_token"])
+
+
+def assert_token_in_uri(request):
+    assert default_token["access_token"] in str(request.url)
+
+
+@pytest.mark.parametrize(
+    "assert_func, token_placement",
+    [
+        (assert_token_in_header, "header"),
+        (assert_token_in_body, "body"),
+        (assert_token_in_uri, "uri"),
+    ],
+)
+def test_add_token_get_request(assert_func, token_placement):
+    transport = WSGITransport(MockDispatch({"a": "a"}, assert_func=assert_func))
+    with OAuth2Client(
+        "foo", token=default_token, token_placement=token_placement, transport=transport
+    ) as client:
+        resp = client.get("https://provider.test")
+
+    data = resp.json()
+    assert data["a"] == "a"
+
+
+@pytest.mark.parametrize(
+    "assert_func, token_placement",
+    [
+        (assert_token_in_header, "header"),
+        (assert_token_in_body, "body"),
+        (assert_token_in_uri, "uri"),
+    ],
+)
+def test_add_token_to_streaming_request(assert_func, token_placement):
+    transport = WSGITransport(MockDispatch({"a": "a"}, assert_func=assert_func))
+    with OAuth2Client(
+        "foo", token=default_token, token_placement=token_placement, transport=transport
+    ) as client:
+        with client.stream("GET", "https://provider.test") as stream:
+            stream.read()
+            data = stream.json()
+    assert data["a"] == "a"
+
+
+def test_create_authorization_url():
+    url = "https://provider.test/authorize?foo=bar"
+
+    sess = OAuth2Client(client_id="foo")
+    auth_url, state = sess.create_authorization_url(url)
+    assert state in auth_url
+    assert "client_id=foo" in auth_url
+    assert "response_type=code" in auth_url
+
+    sess = OAuth2Client(client_id="foo", prompt="none")
+    auth_url, state = sess.create_authorization_url(
+        url, state="foo", redirect_uri="https://provider.test", scope="profile"
+    )
+    assert state == "foo"
+    assert "provider.test" in auth_url
+    assert "profile" in auth_url
+    assert "prompt=none" in auth_url
+
+
+def test_code_challenge():
+    sess = OAuth2Client("foo", code_challenge_method="S256")
+
+    url = "https://provider.test/authorize"
+    auth_url, _ = sess.create_authorization_url(url, code_verifier=generate_token(48))
+    assert "code_challenge=" in auth_url
+    assert "code_challenge_method=S256" in auth_url
+
+
+def test_token_from_fragment():
+    sess = OAuth2Client("foo")
+    response_url = "https://provider.test/callback#" + url_encode(default_token.items())
+    assert sess.token_from_fragment(response_url) == default_token
+    token = sess.fetch_token(authorization_response=response_url)
+    assert token == default_token
+
+
+def test_fetch_token_post():
+    url = "https://provider.test/token"
+
+    def assert_func(request):
+        content = request.form
+        assert content.get("code") == "v"
+        assert content.get("client_id") == "foo"
+        assert content.get("grant_type") == "authorization_code"
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+    with OAuth2Client("foo", transport=transport) as client:
+        token = client.fetch_token(
+            url, authorization_response="https://provider.test/?code=v"
+        )
+        assert token == default_token
+
+    with OAuth2Client(
+        "foo", token_endpoint_auth_method="none", transport=transport
+    ) as client:
+        token = client.fetch_token(url, code="v")
+        assert token == default_token
+
+    transport = WSGITransport(MockDispatch({"error": "invalid_request"}))
+    with OAuth2Client("foo", transport=transport) as client:
+        with pytest.raises(OAuthError):
+            client.fetch_token(url)
+
+
+@pytest.mark.parametrize("body", ["429 Too Many Requests", "429", "null"])
+def test_fetch_token_non_json_object_error_response(body):
+    url = "https://provider.test/token"
+    transport = WSGITransport(MockDispatch(body=body, status_code=429))
+    with OAuth2Client("foo", transport=transport) as client:
+        with pytest.raises(httpx2.HTTPStatusError):
+            client.fetch_token(url)
+
+
+@pytest.mark.parametrize("body", ["not json", "[]"])
+def test_fetch_token_non_json_object_success_response(body):
+    url = "https://provider.test/token"
+    transport = WSGITransport(MockDispatch(body=body, status_code=200))
+    with OAuth2Client("foo", transport=transport) as client:
+        with pytest.raises(ValueError, match="not a JSON object"):
+            client.fetch_token(url)
+
+
+def test_fetch_token_json_error_response():
+    url = "https://provider.test/token"
+    transport = WSGITransport(MockDispatch({"error": "invalid_grant"}, status_code=400))
+    with OAuth2Client("foo", transport=transport) as client:
+        with pytest.raises(OAuthError, match="invalid_grant"):
+            client.fetch_token(url)
+
+
+def test_fetch_token_server_error_json_response():
+    url = "https://provider.test/token"
+    transport = WSGITransport(
+        MockDispatch({"message": "upstream timeout"}, status_code=500)
+    )
+    with OAuth2Client("foo", transport=transport) as client:
+        with pytest.raises(httpx2.HTTPStatusError):
+            client.fetch_token(url)
+
+
+def test_fetch_token_get():
+    url = "https://provider.test/token"
+
+    def assert_func(request):
+        url = str(request.url)
+        assert "code=v" in url
+        assert "client_id=" in url
+        assert "grant_type=authorization_code" in url
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+    with OAuth2Client("foo", transport=transport) as client:
+        authorization_response = "https://provider.test/?code=v"
+        token = client.fetch_token(
+            url, authorization_response=authorization_response, method="GET"
+        )
+        assert token == default_token
+
+    with OAuth2Client(
+        "foo", token_endpoint_auth_method="none", transport=transport
+    ) as client:
+        token = client.fetch_token(url, code="v", method="GET")
+        assert token == default_token
+
+        token = client.fetch_token(url + "?q=a", code="v", method="GET")
+        assert token == default_token
+
+
+def test_token_auth_method_client_secret_post():
+    url = "https://provider.test/token"
+
+    def assert_func(request):
+        content = request.form
+        assert content.get("code") == "v"
+        assert content.get("client_id") == "foo"
+        assert content.get("client_secret") == "bar"
+        assert content.get("grant_type") == "authorization_code"
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+    with OAuth2Client(
+        "foo",
+        "bar",
+        token_endpoint_auth_method="client_secret_post",
+        transport=transport,
+    ) as client:
+        token = client.fetch_token(url, code="v")
+
+    assert token == default_token
+
+
+def test_access_token_response_hook():
+    url = "https://provider.test/token"
+
+    def _access_token_response_hook(resp):
+        assert resp.json() == default_token
+        return resp
+
+    access_token_response_hook = mock.Mock(side_effect=_access_token_response_hook)
+    transport = WSGITransport(MockDispatch(default_token))
+    with OAuth2Client("foo", token=default_token, transport=transport) as sess:
+        sess.register_compliance_hook(
+            "access_token_response", access_token_response_hook
+        )
+        assert sess.fetch_token(url) == default_token
+        assert access_token_response_hook.called is True
+
+
+def test_password_grant_type():
+    url = "https://provider.test/token"
+
+    def assert_func(request):
+        content = request.form
+        assert content.get("username") == "v"
+        assert content.get("scope") == "profile"
+        assert content.get("grant_type") == "password"
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+    with OAuth2Client("foo", scope="profile", transport=transport) as sess:
+        token = sess.fetch_token(url, username="v", password="v")
+        assert token == default_token
+
+        token = sess.fetch_token(url, username="v", password="v", grant_type="password")
+        assert token == default_token
+
+
+def test_client_credentials_type():
+    url = "https://provider.test/token"
+
+    def assert_func(request):
+        content = request.form
+        assert content.get("scope") == "profile"
+        assert content.get("grant_type") == "client_credentials"
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+    with OAuth2Client("foo", scope="profile", transport=transport) as sess:
+        token = sess.fetch_token(url)
+        assert token == default_token
+
+        token = sess.fetch_token(url, grant_type="client_credentials")
+        assert token == default_token
+
+
+def test_cleans_previous_token_before_fetching_new_one():
+    now = int(time.time())
+    new_token = deepcopy(default_token)
+    past = now - 7200
+    default_token["expires_at"] = past
+    new_token["expires_at"] = now + 3600
+    url = "https://provider.test/token"
+
+    transport = WSGITransport(MockDispatch(new_token))
+    with mock.patch("time.time", lambda: now):
+        with OAuth2Client("foo", token=default_token, transport=transport) as sess:
+            assert sess.fetch_token(url) == new_token
+
+
+def test_token_status():
+    token = dict(access_token="a", token_type="bearer", expires_at=100)
+    sess = OAuth2Client("foo", token=token)
+    assert sess.token.is_expired() is True
+
+
+def test_auto_refresh_token():
+    def _update_token(token, refresh_token=None, access_token=None):
+        assert refresh_token == "b"
+        assert token == default_token
+
+    update_token = mock.Mock(side_effect=_update_token)
+
+    old_token = dict(
+        access_token="a", refresh_token="b", token_type="bearer", expires_at=100
+    )
+
+    transport = WSGITransport(MockDispatch(default_token))
+    with OAuth2Client(
+        "foo",
+        token=old_token,
+        token_endpoint="https://provider.test/token",
+        update_token=update_token,
+        transport=transport,
+    ) as sess:
+        sess.get("https://resource.test/user")
+        assert update_token.called is True
+
+    old_token = dict(access_token="a", token_type="bearer", expires_at=100)
+    with OAuth2Client(
+        "foo",
+        token=old_token,
+        token_endpoint="https://provider.test/token",
+        update_token=update_token,
+        transport=transport,
+    ) as sess:
+        with pytest.raises(OAuthError):
+            sess.get("https://resource.test/user")
+
+
+def test_auto_refresh_token2():
+    def _update_token(token, refresh_token=None, access_token=None):
+        assert access_token == "a"
+        assert token == default_token
+
+    update_token = mock.Mock(side_effect=_update_token)
+
+    old_token = dict(access_token="a", token_type="bearer", expires_at=100)
+
+    transport = WSGITransport(MockDispatch(default_token))
+
+    with OAuth2Client(
+        "foo",
+        token=old_token,
+        token_endpoint="https://provider.test/token",
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        client.get("https://resource.test/user")
+        assert update_token.called is False
+
+    with OAuth2Client(
+        "foo",
+        token=old_token,
+        token_endpoint="https://provider.test/token",
+        update_token=update_token,
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        client.get("https://resource.test/user")
+        assert update_token.called is True
+
+
+def test_auto_refresh_token_after_explicit_client_credentials():
+    transport = WSGITransport(MockDispatch(default_token))
+
+    with OAuth2Client(
+        "foo",
+        token_endpoint="https://provider.test/token",
+        transport=transport,
+    ) as client:
+        client.fetch_token(grant_type="client_credentials")
+
+        client.token = dict(access_token="a", token_type="bearer", expires_at=100)
+        client.get("https://resource.test/user")
+        assert client.token["access_token"] == default_token["access_token"]
+
+
+def test_auto_refresh_token_sends_access_token_params():
+    """A new token fetched on expiry is requested with access_token_params."""
+    forms = []
+
+    def assert_func(request):
+        forms.append(dict(request.form))
+
+    transport = WSGITransport(MockDispatch(default_token, assert_func=assert_func))
+
+    with OAuth2Client(
+        "foo",
+        token=dict(access_token="a", token_type="bearer", expires_at=100),
+        token_endpoint="https://provider.test/token",
+        grant_type="client_credentials",
+        access_token_params={"audience": "api"},
+        transport=transport,
+    ) as client:
+        client.get("https://resource.test/user")
+
+    assert forms[0]["audience"] == "api"
+
+
+def test_auto_refresh_token3():
+    def _update_token(token, refresh_token=None, access_token=None):
+        assert access_token == "a"
+        assert token == default_token
+
+    update_token = mock.Mock(side_effect=_update_token)
+
+    old_token = dict(access_token="a", token_type="bearer", expires_at=100)
+
+    transport = WSGITransport(MockDispatch(default_token))
+
+    with OAuth2Client(
+        "foo",
+        token=old_token,
+        token_endpoint="https://provider.test/token",
+        update_token=update_token,
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        client.post("https://resource.test/user", json={"foo": "bar"})
+        assert update_token.called is True
+
+
+def test_revoke_token():
+    answer = {"status": "ok"}
+    transport = WSGITransport(MockDispatch(answer))
+
+    with OAuth2Client("a", transport=transport) as sess:
+        resp = sess.revoke_token("https://provider.test/token", "hi")
+        assert resp.json() == answer
+
+        resp = sess.revoke_token(
+            "https://provider.test/token", "hi", token_type_hint="access_token"
+        )
+        assert resp.json() == answer
+
+
+def test_request_without_token():
+    transport = WSGITransport(MockDispatch())
+    with OAuth2Client("a", transport=transport) as client:
+        with pytest.raises(OAuthError):
+            client.get("https://provider.test/token")
+
+
+def test_client_credentials_without_token_endpoint():
+    """Missing token endpoint must prevent all HTTP requests."""
+    requests_received = []
+
+    def mock_handler(request):
+        requests_received.append(str(request.url))
+        return httpx2.Response(200)
+
+    transport = httpx2.MockTransport(mock_handler)
+
+    with OAuth2Client(
+        client_id="test-client",
+        client_secret="test-secret",
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        with pytest.raises(MissingTokenError):
+            client.get("https://example.com/api/data")
+
+    assert requests_received == []
+
+
+def test_automatic_initial_token_fetch():
+    """The client should fetch an initial token automatically."""
+
+    requests_received = []
+
+    def mock_handler(request):
+        requests_received.append(str(request.url))
+
+        # Simulate OAuth server issuing an access token
+        if request.url.path == "/oauth/token":
+            return httpx2.Response(
+                200,
+                json={
+                    "access_token": "test-access-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+
+        # Simulate a protected API endpoint
+        if request.url.path == "/api/data":
+            authorization = request.headers.get("Authorization")
+
+            if authorization == "Bearer test-access-token":
+                return httpx2.Response(
+                    200,
+                    json={"message": "Success"},
+                )
+
+            return httpx2.Response(
+                401,
+                json={"error": "Unauthorized"},
+            )
+
+        return httpx2.Response(404)
+
+    # Mock HTTP requests without using the internet
+    transport = httpx2.MockTransport(mock_handler)
+
+    with OAuth2Client(
+        client_id="test-client",
+        client_secret="test-secret",
+        token_endpoint="https://example.com/oauth/token",
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        response = client.get("https://example.com/api/data")
+
+        assert response.status_code == 200
+        assert response.json()["message"] == "Success"
+
+        # Verify the token was requested first
+        assert requests_received == [
+            "https://example.com/oauth/token",
+            "https://example.com/api/data",
+        ]
+
+
+def test_existing_valid_token_is_reused():
+    """An existing valid token should not be fetched again."""
+
+    requests_received = []
+
+    def mock_handler(request):
+        requests_received.append(str(request.url))
+
+        if request.url.path == "/api/data":
+            auth_header = request.headers.get("Authorization")
+
+            if auth_header == "Bearer existing-token":
+                return httpx2.Response(
+                    200,
+                    json={"message": "Success"},
+                )
+
+            return httpx2.Response(401)
+
+        return httpx2.Response(404)
+
+    transport = httpx2.MockTransport(mock_handler)
+
+    with OAuth2Client(
+        client_id="test-client",
+        client_secret="test-secret",
+        token_endpoint="https://example.com/oauth/token",
+        grant_type="client_credentials",
+        token={
+            "access_token": "existing-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        },
+        transport=transport,
+    ) as client:
+        response = client.get("https://example.com/api/data")
+
+        assert response.status_code == 200
+        assert requests_received == ["https://example.com/api/data"]
+
+
+def test_missing_token_configuration():
+    """A client without token configuration should raise MissingTokenError."""
+
+    requests_received = []
+
+    def mock_handler(request):
+        requests_received.append(str(request.url))
+        return httpx2.Response(200)
+
+    transport = httpx2.MockTransport(mock_handler)
+
+    with OAuth2Client(
+        client_id="test-client",
+        client_secret="test-secret",
+        transport=transport,
+    ) as client:
+        with pytest.raises(MissingTokenError):
+            client.get("https://example.com/api/data")
+
+    # The request should never reach the API server.
+    assert requests_received == []
+
+
+def test_stream_automatically_fetches_initial_token():
+    """Streaming requests should fetch an initial token."""
+
+    requests_received = []
+
+    def mock_handler(request):
+        requests_received.append(str(request.url))
+
+        if request.url.path == "/oauth/token":
+            return httpx2.Response(
+                200,
+                json={
+                    "access_token": "stream-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+
+        if request.url.path == "/api/data":
+            if request.headers.get("Authorization") == "Bearer stream-token":
+                return httpx2.Response(
+                    200,
+                    json={"message": "Stream success"},
+                )
+
+            return httpx2.Response(401)
+
+        return httpx2.Response(404)
+
+    transport = httpx2.MockTransport(mock_handler)
+
+    with OAuth2Client(
+        client_id="test-client",
+        client_secret="test-secret",
+        token_endpoint="https://example.com/oauth/token",
+        grant_type="client_credentials",
+        transport=transport,
+    ) as client:
+        with client.stream("GET", "https://example.com/api/data") as response:
+            assert response.status_code == 200
+            assert response.json()["message"] == "Stream success"
+
+    assert requests_received == [
+        "https://example.com/oauth/token",
+        "https://example.com/api/data",
+    ]
+
+
+def test_repeated_body_parameters():
+    """The RFC 8707 resource and RFC 8693 audience parameters keep all their values."""
+    bodies = []
+
+    def mock_handler(request):
+        bodies.append(request.content.decode())
+        return httpx2.Response(200, json=default_token)
+
+    url = "https://provider.test/token"
+    body = (
+        "resource=https%3A%2F%2Fa.test%2F&resource=https%3A%2F%2Fb.test%2F"
+        "&audience=c&audience=d"
+    )
+    transport = httpx2.MockTransport(mock_handler)
+    with OAuth2Client("foo", "bar", token=default_token, transport=transport) as client:
+        client.fetch_token(url, body=body, grant_type="client_credentials")
+        client.refresh_token(url, refresh_token="b", body=body)
+        client.revoke_token(url, "hi", body=body)
+        client.introspect_token(url, "hi", body=body)
+
+    assert len(bodies) == 4
+    for sent in bodies:
+        params = url_decode(sent)
+        assert [value for key, value in params if key == "resource"] == [
+            "https://a.test/",
+            "https://b.test/",
+        ]
+        assert [value for key, value in params if key == "audience"] == ["c", "d"]
+        keys = [key for key, _ in params]
+        assert len(set(keys)) == len(keys) - 2

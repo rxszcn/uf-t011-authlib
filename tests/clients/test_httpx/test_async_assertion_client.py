@@ -1,0 +1,128 @@
+import time
+import urllib.parse
+
+import pytest
+from httpx2 import ASGITransport
+from joserfc.jwk import OctKey
+
+from authlib.integrations.httpx_client import AsyncAssertionClient
+from tests.util import HMAC_SECRET
+
+from ..asgi_helper import AsyncMockDispatch
+
+hmac_key = OctKey.import_key(HMAC_SECRET)
+
+default_token = {
+    "token_type": "Bearer",
+    "access_token": "a",
+    "refresh_token": "b",
+    "expires_in": "3600",
+    "expires_at": int(time.time()) + 3600,
+}
+
+
+@pytest.mark.asyncio
+async def test_refresh_token():
+    async def verifier(request):
+        content = await request.body()
+        if str(request.url) == "https://provider.test/token":
+            assert b"assertion=" in content
+
+    async with AsyncAssertionClient(
+        "https://provider.test/token",
+        grant_type=AsyncAssertionClient.JWT_BEARER_GRANT_TYPE,
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        transport=ASGITransport(AsyncMockDispatch(default_token, assert_func=verifier)),
+    ) as client:
+        await client.get("https://provider.test")
+
+    # trigger more case
+    now = int(time.time())
+    async with AsyncAssertionClient(
+        "https://provider.test/token",
+        issuer="foo",
+        subject=None,
+        audience="foo",
+        issued_at=now,
+        expires_at=now + 3600,
+        header={"alg": "HS256"},
+        key=hmac_key,
+        scope="email",
+        claims={"test_mode": "true"},
+        transport=ASGITransport(AsyncMockDispatch(default_token, assert_func=verifier)),
+    ) as client:
+        await client.get("https://provider.test")
+        await client.get("https://provider.test")
+
+
+@pytest.mark.asyncio
+async def test_client_id():
+    """client_id is included in the token request body when provided."""
+
+    async def verifier(request):
+        if str(request.url) == "https://provider.test/token":
+            content = await request.body()
+            assert b"assertion=" in content
+            assert b"client_id=my-client" in content
+
+    async with AsyncAssertionClient(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        client_id="my-client",
+        transport=ASGITransport(AsyncMockDispatch(default_token, assert_func=verifier)),
+    ) as client:
+        await client.get("https://provider.test")
+
+
+@pytest.mark.asyncio
+async def test_without_alg():
+    async with AsyncAssertionClient(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        key=hmac_key,
+        transport=ASGITransport(AsyncMockDispatch()),
+    ) as client:
+        with pytest.raises(ValueError):
+            await client.get("https://provider.test")
+
+
+@pytest.mark.asyncio
+async def test_access_token_params():
+    """access_token_params are added to the token request."""
+    bodies = []
+
+    async def verifier(request):
+        if str(request.url) == "https://provider.test/token":
+            bodies.append((await request.body()).decode())
+
+    async with AsyncAssertionClient(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key=hmac_key,
+        scope="email",
+        access_token_params={
+            "resource": ["https://a.test/"],
+            "scope": "x",
+            "foo": None,
+        },
+        transport=ASGITransport(AsyncMockDispatch(default_token, assert_func=verifier)),
+    ) as client:
+        await client.get("https://provider.test")
+
+    params = urllib.parse.parse_qsl(bodies[0], keep_blank_values=True)
+    assert ("resource", "https://a.test/") in params
+    assert [v for k, v in params if k == "scope"] == ["email"]
+    assert "foo" not in [k for k, _ in params]

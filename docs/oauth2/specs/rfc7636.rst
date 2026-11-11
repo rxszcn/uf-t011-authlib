@@ -1,0 +1,189 @@
+.. _specs/rfc7636:
+
+RFC 7636: Proof Key for Code Exchange by OAuth Public Clients
+=============================================================
+
+.. meta::
+    :description: API references on RFC 7636 Proof Key for Code Exchange
+        by OAuth Public Clients implementation, guide on how to add it to
+        OAuth 2.0 authorization server.
+
+This :rfc:`7636` is used to improve the security of Authorization Code flow
+for public clients by sending extra "code_challenge" and "code_verifier"
+to the authorization server.
+
+The ``code_challenge`` goes to the authorization endpoint, through the
+browser. The ``code_verifier`` goes to the token endpoint, from server to
+server. Someone who steals the code cannot use it without the
+``code_verifier``:
+
+.. mermaid::
+
+    sequenceDiagram
+        autonumber
+        participant User as User's browser<br/>(User Agent)
+        participant Client
+        box rgba(80, 120, 220, 0.12) CodeChallenge
+            participant AS as Authorization Server
+        end
+        participant RS as Resource Server
+
+        Note over Client: Generates a code_verifier<br/>and its code_challenge
+        rect rgba(120, 120, 120, 0.08)
+            Note over User,AS: Front channel (browser)
+            Client-->>User: 302 Found → /authorize
+            User->>AS: GET /authorize (code_challenge)
+            Note over User,AS: The user logs in and approves
+            AS-->>User: 303 See Other → redirect_uri?code=…
+            User->>Client: GET redirect_uri?code=…
+        end
+        rect rgba(120, 120, 120, 0.08)
+            Note over Client,RS: Back channel (server to server)
+            Client->>AS: POST /token (code, code_verifier)
+            AS-->>Client: 200 OK + access token
+            Client->>RS: GET /api (bearer token)
+            RS-->>Client: 200 OK + resource
+        end
+
+1. The client redirects the browser to the authorization endpoint.
+2. The request contains ``code_challenge`` and ``code_challenge_method``.
+   With ``S256``, ``code_challenge`` is the SHA-256 hash of
+   ``code_verifier``, in base64url. :class:`CodeChallenge` checks the format
+   of ``code_challenge`` and the support of ``code_challenge_method``. The
+   ``save_authorization_code`` method of the grant stores them with the code.
+3. The authorization server redirects the browser to the client with a code.
+4. The client receives the code.
+5. The client sends the ``code`` and the ``code_verifier``.
+   :class:`CodeChallenge` computes the challenge from ``code_verifier`` and
+   compares it with the stored ``code_challenge``. It returns
+   ``invalid_grant`` if they differ.
+6. The authorization server returns an access token.
+7. The client calls the API of the Resource Server with the access token,
+   in the ``Authorization: Bearer`` header.
+8. The Resource Server returns the protected resource.
+
+The ``/authorize``, ``/token`` and ``/api`` paths are examples.
+
+.. module:: authlib.oauth2.rfc7636
+
+
+Using RFC 7636 in Authorization Code Grant
+------------------------------------------
+
+In order to apply proof key for code exchange, you need to register the
+:class:`CodeChallenge` extension to ``AuthorizationCodeGrant``. But before
+that, we need to re-design our AuthorizationCode database.
+
+* For Flask Developers, check the section :ref:`flask_oauth2_code_grant`.
+* For Django Developers, check the section :ref:`django_oauth2_code_grant`.
+
+The ``AuthorizationCode`` table needs two more columns:
+
+1. code_challenge: A VARCHAR
+2. code_challenge_method: A VARCHAR
+
+And the ``AuthorizationCodeGrant`` should record the ``code_challenge`` and
+``code_challenge_method`` into database in ``save_authorization_code``
+method. Add ``none`` to ``TOKEN_ENDPOINT_AUTH_METHODS`` to accept public
+clients, which have no client secret:
+
+.. code-block:: python
+
+    class MyAuthorizationCodeGrant(AuthorizationCodeGrant):
+        TOKEN_ENDPOINT_AUTH_METHODS = ['client_secret_basic', 'client_secret_post', 'none']
+
+        def save_authorization_code(self, code, request):
+            # NOTICE BELOW
+            code_challenge = request.payload.data.get('code_challenge')
+            code_challenge_method = request.payload.data.get('code_challenge_method')
+            auth_code = AuthorizationCode(
+                code=code,
+                client_id=request.client.client_id,
+                redirect_uri=request.payload.redirect_uri,
+                scope=request.scope,
+                user_id=request.user.id,
+                code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
+            )
+            auth_code.save()
+            return auth_code
+
+
+Now you can register your ``AuthorizationCodeGrant`` with the extension:
+
+.. code-block:: python
+
+    from authlib.oauth2.rfc7636 import CodeChallenge
+    server.register_grant(MyAuthorizationCodeGrant, [CodeChallenge()])
+
+By default, public clients must use PKCE. Per
+:rfc:`RFC 7636 §4.4.1 <7636#section-4.4.1>`, the authorization endpoint rejects a public client
+that sends no ``code_challenge`` with an ``invalid_request`` error. The token
+endpoint rejects a public client that sends no ``code_verifier``. Confidential
+clients may use PKCE, but are not required to.
+
+Per :rfc:`RFC 9700 §2.1.1 <9700#section-2.1.1>`, PKCE is also recommended for
+confidential clients. To require it for all clients, override
+:meth:`~CodeChallenge.is_code_challenge_required`:
+
+.. code-block:: python
+
+    class MyCodeChallenge(CodeChallenge):
+        def is_code_challenge_required(self, request):
+            return True
+
+The method receives the request, so the policy can depend on
+``request.client``. It is called at the authorization endpoint and at the
+token endpoint, and must give the same answer at both for a given code. When
+it returns ``True``, the token endpoint rejects the codes that were issued
+without ``code_challenge``. To make PKCE optional for all clients, return
+``False``.
+
+In all cases:
+
+* If the authorization request contained a ``code_challenge``, the token
+  request must contain a matching ``code_verifier``.
+* If the authorization request contained no ``code_challenge``, a token
+  request with a ``code_verifier`` is rejected.
+
+Per :rfc:`RFC 9700 §2.1.1 <9700#section-2.1.1>`, clients should use ``S256``. To refuse
+``plain``, limit the supported methods:
+
+.. code-block:: python
+
+    class MyCodeChallenge(CodeChallenge):
+        SUPPORTED_CODE_CHALLENGE_METHOD = ["S256"]
+
+A request without ``code_challenge_method`` is then rejected, because the
+method defaults to ``plain`` (:rfc:`RFC 7636 §4.3 <7636#section-4.3>`).
+
+Using ``code_challenge`` in Client
+----------------------------------
+
+Read the **Code Challenge** section in the :ref:`frameworks_clients`.
+
+It is also possible to add ``code_challenge`` in ``OAuth2Session``,
+consider that we already have a ``session``:
+
+.. skip: start "calls a remote server"
+
+.. code-block:: pycon
+
+    >>> from authlib.common.security import generate_token
+    >>> from authlib.oauth2.rfc7636 import create_s256_code_challenge
+    >>> code_verifier = generate_token(48)
+    >>> code_challenge = create_s256_code_challenge(code_verifier)
+    >>> uri, state = session.create_authorization_url(authorize_url, code_challenge=code_challenge, code_challenge_method='S256')
+    >>> # visit uri, get the response
+    >>> authorization_response = 'https://example.com/auth?code=42..e9&state=d..t'
+    >>> token = session.fetch_token(token_endpoint, authorization_response=authorization_response, code_verifier=code_verifier)
+
+.. skip: end
+
+
+API Reference
+-------------
+
+.. autoclass:: CodeChallenge
+    :member-order: bysource
+    :members:
