@@ -1,6 +1,7 @@
 import time
 
 from joserfc import jwt
+from joserfc.errors import BadSignatureError
 from joserfc.errors import InvalidKeyIdError
 from joserfc.jwk import KeySet
 from joserfc.jws import JWSRegistry
@@ -44,8 +45,13 @@ def _get_claims_options(claims_options, metadata):
 
 
 def _may_refresh_jwk_set(client):
-    """Tell if the JWK set can be fetched again for an unknown ``kid``, at
-    most once per ``jwks_refresh_interval`` seconds.
+    """Tell if the JWK set can be fetched again, at most once per
+    ``jwks_refresh_interval`` seconds.
+
+    The rate limit applies whatever made the cached key set fail: an unknown
+    ``kid`` (a key is missing) or a signature that does not verify (the key
+    for the token is not the cached one, for instance an ID token without a
+    ``kid`` after the provider rotated its keys).
     """
     now = time.monotonic()
     refreshed_at = client._jwk_set_refreshed_at
@@ -56,9 +62,27 @@ def _may_refresh_jwk_set(client):
     return True
 
 
+def _decode_id_token(value, jwks, alg_values):
+    """Decode an ID token with a JWK set.
+
+    :raises InvalidKeyIdError: the ``kid`` of the token is not in the set,
+        or the token has no ``kid`` while the set has several keys.
+    :raises BadSignatureError: a key was found, but its signature does not
+        verify. This also covers tokens without a ``kid`` verified with the
+        only key of the set, for instance after a key rotation.
+    """
+    key_set = KeySet.import_key_set(jwks)
+    return jwt.decode(
+        value,
+        key=key_set,
+        registry=JWSRegistry(algorithms=alg_values, strict_check_header=False),
+    )
+
+
 class OpenIDMixin:
     #: Minimum number of seconds between two fetches of the JWK set caused by
-    #: an ID token with an unknown ``kid``.
+    #: an ID token that cannot be verified with the cached keys: either its
+    #: ``kid`` is unknown, or its signature does not match.
     jwks_refresh_interval = 60
     _jwk_set_refreshed_at = None
 
@@ -115,22 +139,22 @@ class OpenIDMixin:
         claims_options = _get_claims_options(claims_options, metadata)
         alg_values = _get_id_token_algorithms(metadata)
 
-        key_set = KeySet.import_key_set(self.fetch_jwk_set())
+        id_token_value = token["id_token"]
         try:
-            token = jwt.decode(
-                token["id_token"],
-                key=key_set,
-                registry=JWSRegistry(algorithms=alg_values, strict_check_header=False),
-            )
-        except InvalidKeyIdError:
-            if metadata.get("jwks_uri") and not _may_refresh_jwk_set(self):
+            token = _decode_id_token(id_token_value, self.fetch_jwk_set(), alg_values)
+        except (InvalidKeyIdError, BadSignatureError):
+            # Two rotation symptoms share the same remedy, a forced fetch:
+            # InvalidKeyIdError means the signing key is absent from the
+            # cached set; BadSignatureError means a key was selected but its
+            # signature does not verify, which is what tokens without a
+            # ``kid`` raise when the provider rotated its only key.
+            if not _may_refresh_jwk_set(self):
                 raise
 
-            key_set = KeySet.import_key_set(self.fetch_jwk_set(force=True))
-            token = jwt.decode(
-                token["id_token"],
-                key=key_set,
-                registry=JWSRegistry(algorithms=alg_values, strict_check_header=False),
+            # Without a jwks_uri, fetch_jwk_set raises a RuntimeError rather
+            # than silently keeping a key set the application set statically.
+            token = _decode_id_token(
+                id_token_value, self.fetch_jwk_set(force=True), alg_values
             )
 
         claims = claims_cls(token.claims, token.header, claims_options, claims_params)

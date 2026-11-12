@@ -1,7 +1,5 @@
-from joserfc import jwt
+from joserfc.errors import BadSignatureError
 from joserfc.errors import InvalidKeyIdError
-from joserfc.jwk import KeySet
-from joserfc.jws import JWSRegistry
 
 from authlib.common.security import generate_token
 from authlib.common.urls import add_params_to_uri
@@ -9,6 +7,7 @@ from authlib.oidc.core import CodeIDToken
 from authlib.oidc.core import ImplicitIDToken
 from authlib.oidc.core import UserInfo
 
+from .sync_openid import _decode_id_token
 from .sync_openid import _get_claims_options
 from .sync_openid import _get_id_token_algorithms
 from .sync_openid import _may_refresh_jwk_set
@@ -18,7 +17,8 @@ __all__ = ["AsyncOpenIDMixin"]
 
 class AsyncOpenIDMixin:
     #: Minimum number of seconds between two fetches of the JWK set caused by
-    #: an ID token with an unknown ``kid``.
+    #: an ID token that cannot be verified with the cached keys: either its
+    #: ``kid`` is unknown, or its signature does not match.
     jwks_refresh_interval = 60
     _jwk_set_refreshed_at = None
 
@@ -70,24 +70,24 @@ class AsyncOpenIDMixin:
         claims_options = _get_claims_options(claims_options, metadata)
         alg_values = _get_id_token_algorithms(metadata)
 
-        jwks = await self.fetch_jwk_set()
-        key_set = KeySet.import_key_set(jwks)
+        id_token_value = token["id_token"]
         try:
-            token = jwt.decode(
-                token["id_token"],
-                key=key_set,
-                registry=JWSRegistry(algorithms=alg_values, strict_check_header=False),
+            token = _decode_id_token(
+                id_token_value, await self.fetch_jwk_set(), alg_values
             )
-        except InvalidKeyIdError:
-            if metadata.get("jwks_uri") and not _may_refresh_jwk_set(self):
+        except (InvalidKeyIdError, BadSignatureError):
+            # Two rotation symptoms share the same remedy, a forced fetch:
+            # InvalidKeyIdError means the signing key is absent from the
+            # cached set; BadSignatureError means a key was selected but its
+            # signature does not verify, which is what tokens without a
+            # ``kid`` raise when the provider rotated its only key.
+            if not _may_refresh_jwk_set(self):
                 raise
 
-            jwks = await self.fetch_jwk_set(force=True)
-            key_set = KeySet.import_key_set(jwks)
-            token = jwt.decode(
-                token["id_token"],
-                key=key_set,
-                registry=JWSRegistry(algorithms=alg_values, strict_check_header=False),
+            # Without a jwks_uri, fetch_jwk_set raises a RuntimeError rather
+            # than silently keeping a key set the application set statically.
+            token = _decode_id_token(
+                id_token_value, await self.fetch_jwk_set(force=True), alg_values
             )
 
         claims = claims_cls(token.claims, token.header, claims_options, claims_params)

@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 from flask import Flask
 from joserfc import jwt
+from joserfc.errors import BadSignatureError
 from joserfc.errors import InvalidClaimError
 from joserfc.errors import InvalidKeyIdError
 from joserfc.errors import MissingClaimError
@@ -352,3 +353,139 @@ def test_parse_id_token_unknown_kid_refresh_interval():
             with pytest.raises(InvalidKeyIdError):
                 client.parse_id_token({"id_token": id_token}, nonce="n")
             assert len(fetches) == 2
+
+
+rotated_key = OctKey.import_key("rotated-oct-secret", {"kty": "oct", "kid": "rotated"})
+
+
+def _rotated_claims():
+    now = int(time.time())
+    return {
+        "sub": "123",
+        "iss": "https://provider.test",
+        "aud": "dev",
+        "iat": now,
+        "exp": now + 3600,
+        "nonce": "n",
+    }
+
+
+def _rotation_client(refreshed_keys=None):
+    """Client whose cached JWK set only holds the retired ``secret_key``.
+
+    ``refreshed_keys`` is what the provider returns when the JWK set is
+    fetched again. It defaults to the rotated key, which makes verification
+    recover; passing the retired key simulates an endpoint that does not know
+    the token's key yet, so the error persists.
+    """
+    app, client = _register_client(
+        id_token_signing_alg_values_supported=["HS256"],
+        jwks_uri="https://provider.test/jwks",
+    )
+    fetched_keys = refreshed_keys
+    if fetched_keys is None:
+        fetched_keys = [rotated_key.as_dict()]
+    fetches = []
+
+    def fake_send(sess, req, **kwargs):
+        fetches.append(req.url)
+        resp = mock.MagicMock()
+        resp.json = lambda: {"keys": fetched_keys}
+        resp.status_code = 200
+        return resp
+
+    return app, client, fetches, fake_send
+
+
+def test_parse_id_token_rotated_key_without_kid_refreshes():
+    """A token without a kid after a key rotation fails the signature, then
+    recovers once the JWK set is fetched again.
+    """
+    app, client, fetches, fake_send = _rotation_client()
+    # A single-key set makes joserfc verify the token with the only key, so a
+    # rotation without a kid in the header raises BadSignatureError.
+    id_token = jwt.encode({"alg": "HS256"}, _rotated_claims(), rotated_key)
+
+    with app.test_request_context():
+        with mock.patch("requests.sessions.Session.send", fake_send):
+            user = client.parse_id_token({"id_token": id_token}, nonce="n")
+    assert user.sub == "123"
+    assert len(fetches) == 1
+
+
+def test_parse_id_token_rotated_key_with_kid_refreshes():
+    """An unknown kid (the signing key is missing from the cache) recovers by
+    fetching the JWK set again.
+    """
+    app, client, fetches, fake_send = _rotation_client()
+    id_token = jwt.encode(
+        {"alg": "HS256", "kid": "rotated"}, _rotated_claims(), rotated_key
+    )
+
+    with app.test_request_context():
+        with mock.patch("requests.sessions.Session.send", fake_send):
+            user = client.parse_id_token({"id_token": id_token}, nonce="n")
+    assert user.sub == "123"
+    assert len(fetches) == 1
+
+
+def test_parse_id_token_bad_signature_refresh_interval():
+    """Signature failures trigger the same rate-limited refresh as an unknown
+    kid, so a provider cannot be hammered by forged ID tokens.
+    """
+    # The endpoint still serves the retired key: every attempt fails.
+    app, client, fetches, fake_send = _rotation_client(
+        refreshed_keys=[secret_key.as_dict()]
+    )
+    id_token = jwt.encode({"alg": "HS256"}, _rotated_claims(), rotated_key)
+
+    with app.test_request_context():
+        with mock.patch("requests.sessions.Session.send", fake_send):
+            for _ in range(3):
+                with pytest.raises(BadSignatureError):
+                    client.parse_id_token({"id_token": id_token}, nonce="n")
+            assert len(fetches) == 1
+
+            client._jwk_set_refreshed_at -= client.jwks_refresh_interval
+            with pytest.raises(BadSignatureError):
+                client.parse_id_token({"id_token": id_token}, nonce="n")
+            assert len(fetches) == 2
+
+
+def test_parse_id_token_refresh_interval_shared_by_error_kinds():
+    """A refresh caused by one error kind counts for the other kind too."""
+    # The endpoint still serves the retired key: every attempt fails.
+    app, client, fetches, fake_send = _rotation_client(
+        refreshed_keys=[secret_key.as_dict()]
+    )
+    no_kid_token = jwt.encode({"alg": "HS256"}, _rotated_claims(), rotated_key)
+    unknown_kid_token = jwt.encode(
+        {"alg": "HS256", "kid": "rotated"}, _rotated_claims(), rotated_key
+    )
+
+    with app.test_request_context():
+        with mock.patch("requests.sessions.Session.send", fake_send):
+            # The signature failure spends the single allowed refresh.
+            with pytest.raises(BadSignatureError):
+                client.parse_id_token({"id_token": no_kid_token}, nonce="n")
+            assert len(fetches) == 1
+
+            # The unknown kid must not trigger another fetch within the
+            # interval, even though it is a different error.
+            with pytest.raises(InvalidKeyIdError):
+                client.parse_id_token({"id_token": unknown_kid_token}, nonce="n")
+            assert len(fetches) == 1
+
+
+def test_parse_id_token_bad_signature_without_jwks_uri():
+    """Without a jwks_uri, a signature failure cannot be repaired: the forced
+    fetch raises a RuntimeError instead of swallowing the bad signature.
+    """
+    app, client = _register_client(
+        id_token_signing_alg_values_supported=["HS256"],
+    )
+    id_token = jwt.encode({"alg": "HS256"}, _rotated_claims(), rotated_key)
+
+    with app.test_request_context():
+        with pytest.raises(RuntimeError):
+            client.parse_id_token({"id_token": id_token}, nonce="n")
